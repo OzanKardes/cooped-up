@@ -58,7 +58,14 @@ function Slide({ item }: { item: typeof SLIDES[0] }) {
       </View>
 
       {/* Headline */}
-      <Text style={[styles.headline, { color: item.textColor }]}>{item.headline}</Text>
+      <Text
+        style={[styles.headline, { color: item.textColor }]}
+        adjustsFontSizeToFit
+        minimumFontScale={0.75}
+        numberOfLines={3}
+      >
+        {item.headline}
+      </Text>
 
       {/* Body */}
       <Text style={[styles.body, { color: item.textColor, opacity: 0.75 }]}>{item.body}</Text>
@@ -106,23 +113,6 @@ export default function OnboardingScreen() {
 
       {/* Bottom controls — sit over the slides */}
       <View style={[styles.controls, { backgroundColor: currentSlide.bg }]}>
-        {/* Dot indicators */}
-        <View style={styles.dots}>
-          {SLIDES.map((_, i) => (
-            <View
-              key={i}
-              style={[
-                styles.dot,
-                {
-                  backgroundColor: i === activeIndex ? currentSlide.textColor : 'transparent',
-                  borderColor: currentSlide.textColor,
-                  width: i === activeIndex ? 24 : 8,
-                },
-              ]}
-            />
-          ))}
-        </View>
-
         {/* CTA button */}
         <TouchableOpacity
           style={[
@@ -139,6 +129,23 @@ export default function OnboardingScreen() {
             {isLast ? 'GET STARTED →' : 'NEXT →'}
           </Text>
         </TouchableOpacity>
+
+        {/* Dot indicators — below the button */}
+        <View style={styles.dots}>
+          {SLIDES.map((_, i) => (
+            <View
+              key={i}
+              style={[
+                styles.dot,
+                {
+                  backgroundColor: i === activeIndex ? currentSlide.textColor : 'transparent',
+                  borderColor: currentSlide.textColor,
+                  width: i === activeIndex ? 24 : 8,
+                },
+              ]}
+            />
+          ))}
+        </View>
 
         {/* Skip */}
         {!isLast && (
@@ -215,7 +222,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 6,
     alignItems: 'center',
-    marginBottom: 8,
   },
   dot: {
     height: 8,
