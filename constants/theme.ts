@@ -7,6 +7,8 @@ export const Colors = {
   black: '#0D0D0D',
   white: '#F5F3EE',        // warm off-white, not pure white
   cream: '#EDE9E0',
+  lightGrey: '#F2F2F2',    // screen background (Imperial design)
+  imperialNavy: '#003087', // Imperial College primary navy
 
   // Blues & Grays (primary palette)
   navy: '#1B2A4A',

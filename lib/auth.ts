@@ -16,6 +16,7 @@ export async function signUp(
   fullName: string,
   degree: string,
   yearOfStudy: string,
+  avatarInitials = '',
 ) {
   const { data, error } = await supabase.auth.signUp({
     email,
@@ -25,6 +26,7 @@ export async function signUp(
         full_name: fullName,
         degree,
         year_of_study: yearOfStudy,
+        avatar_initials: avatarInitials,
       },
     },
   });

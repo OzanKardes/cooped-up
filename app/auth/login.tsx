@@ -7,6 +7,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
 import { signIn, signUp } from '../../lib/auth';
+import { updateProfile } from '../../services/users';
 import { Toast, ToastRef, setToastRef, showToast } from '../../components/Toast';
 
 // ─── Picker data ──────────────────────────────────────────────────────────────
@@ -270,10 +271,11 @@ const pickerStyles = StyleSheet.create({
 // ─── Login screen ─────────────────────────────────────────────────────────────
 export default function LoginScreen() {
   const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail]       = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName]         = useState('');
-  const [degree, setDegree]     = useState('');
+  const [email, setEmail]         = useState('');
+  const [password, setPassword]   = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [surname, setSurname]     = useState('');
+  const [degree, setDegree]       = useState('');
   const [year, setYear]         = useState('');
   const [loading, setLoading]   = useState(false);
   const [emailError, setEmailError]   = useState('');
@@ -302,9 +304,10 @@ export default function LoginScreen() {
     if (!validateEmail(email)) return;
     if (!password) { showToast('Please enter your password'); return; }
     if (!isLogin) {
-      if (!name.trim())  { showToast('Please enter your full name'); return; }
-      if (!degree)       { setDegreeError('Please select your degree'); return; }
-      if (!year)         { setYearError('Please select your year of study'); return; }
+      if (!firstName.trim()) { showToast('Please enter your first name'); return; }
+      if (!surname.trim())   { showToast('Please enter your surname'); return; }
+      if (!degree)           { setDegreeError('Please select your degree'); return; }
+      if (!year)             { setYearError('Please select your year of study'); return; }
     }
 
     setLoading(true);
@@ -312,10 +315,21 @@ export default function LoginScreen() {
       if (isLogin) {
         await signIn(email.trim(), password);
       } else {
-        await signUp(email.trim(), password, name.trim(), degree, year);
-        // Explicitly sign in after account creation so navigation fires
-        // regardless of whether Supabase email confirmation is enabled
-        await signIn(email.trim(), password);
+        const fullName       = `${firstName.trim()} ${surname.trim()}`;
+        const avatarInitials = (firstName.trim()[0] ?? '').toUpperCase() +
+                               (surname.trim()[0] ?? '').toUpperCase();
+        await signUp(email.trim(), password, fullName, degree, year, avatarInitials);
+        // Sign in after creation so navigation fires regardless of email confirmation setting
+        const signInResult = await signIn(email.trim(), password);
+        // Ensure name + initials are in the users table (safety net if DB trigger omits them)
+        if (signInResult?.session?.user?.id) {
+          try {
+            await updateProfile(signInResult.session.user.id, {
+              full_name: fullName,
+              avatar_initials: avatarInitials,
+            });
+          } catch {}
+        }
       }
       // _layout.tsx onAuthStateChange will navigate to /(tabs) automatically
     } catch (err: any) {
@@ -370,10 +384,16 @@ export default function LoginScreen() {
             {!isLogin && (
               <>
                 <BrutalInput
-                  label="FULL NAME"
-                  placeholder="Your name"
-                  value={name}
-                  onChangeText={setName}
+                  label="FIRST NAME(S)"
+                  placeholder="e.g. John"
+                  value={firstName}
+                  onChangeText={setFirstName}
+                />
+                <BrutalInput
+                  label="SURNAME"
+                  placeholder="e.g. Smith"
+                  value={surname}
+                  onChangeText={setSurname}
                 />
                 <BrutalPicker
                   label="DEGREE"

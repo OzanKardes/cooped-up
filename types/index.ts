@@ -10,6 +10,7 @@ export interface User {
   created_at: string;
   degree?: string | null;
   year_of_study?: string | null;
+  avatar_url?: string | null;
 }
 
 export interface Friendship {

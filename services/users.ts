@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { User } from '../types';
 import { showToast } from '../components/Toast';
+import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
 export async function getUserProfile(userId: string): Promise<User | null> {
   try {
@@ -17,7 +18,33 @@ export async function getUserProfile(userId: string): Promise<User | null> {
   }
 }
 
-export async function updateProfile(userId: string, updates: Partial<Pick<User, 'full_name' | 'avatar_initials' | 'hours_outside' | 'degree' | 'year_of_study'>>) {
+export async function uploadAvatar(userId: string, uri: string): Promise<string> {
+  // Always upload as JPEG — simpler path, works for both camera and library
+  const path = `${userId}/avatar.jpg`;
+
+  // expo-file-system/legacy handles both file:// and content:// URIs reliably across iOS/Android
+  const base64 = await readAsStringAsync(uri, { encoding: EncodingType.Base64 });
+
+  // Decode base64 → Uint8Array for Supabase Storage
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+
+  const { error } = await supabase.storage
+    .from('avatars')
+    .upload(path, bytes, { upsert: true, contentType: 'image/jpeg' });
+  if (error) throw error;
+
+  const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+  // Timestamp busts React Native Image cache so the new photo is always shown
+  const publicUrl = `${data.publicUrl}?t=${Date.now()}`;
+  await supabase.from('users').update({ avatar_url: publicUrl }).eq('id', userId);
+  return publicUrl;
+}
+
+export async function updateProfile(userId: string, updates: Partial<Pick<User, 'full_name' | 'avatar_initials' | 'hours_outside' | 'degree' | 'year_of_study' | 'avatar_url'>>) {
   try {
     const { error } = await supabase
       .from('users')

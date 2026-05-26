@@ -102,6 +102,25 @@ export function subscribeToMessages(
   return () => { supabase.removeChannel(channel); };
 }
 
+export async function createChatGroup(
+  name: string,
+  creatorId: string,
+  memberIds: string[]
+): Promise<string> {
+  const { data, error } = await supabase
+    .from('chat_groups')
+    .insert({ name, created_by: creatorId })
+    .select()
+    .single();
+  if (error) throw error;
+  const members = [creatorId, ...memberIds.filter(id => id !== creatorId)].map(uid => ({
+    group_id: data.id,
+    user_id: uid,
+  }));
+  await supabase.from('group_members').insert(members);
+  return data.id as string;
+}
+
 export function subscribeToGroupMessages(
   groupId: string,
   callback: (message: Message) => void

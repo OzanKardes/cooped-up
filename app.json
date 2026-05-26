@@ -28,7 +28,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Cooped Up needs access to your photos to set a profile picture.",
+          "cameraPermission": "Cooped Up needs camera access to take a profile photo."
+        }
+      ]
     ]
   }
 }

@@ -36,8 +36,8 @@ export default function RootLayout() {
       {/* Auth flow */}
       <Stack.Screen name="auth/login" />
 
-      {/* Main app — single screen with wheel nav built in */}
-      <Stack.Screen name="(tabs)/index" />
+      {/* Main app — tab navigator */}
+      <Stack.Screen name="(tabs)" />
     </Stack>
   );
 }

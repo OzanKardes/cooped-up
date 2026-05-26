@@ -5,8 +5,10 @@ import {
   KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import BackArrow from '../../components/ui/BackArrow';
 import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
+import { isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
 import {
@@ -654,31 +656,23 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
 // ─── Group row ────────────────────────────────────────────────────────────────
 function GroupRow({ group, onPress }: { group: GroupThread; onPress: () => void }) {
   return (
-    <TouchableOpacity style={styles.chatRow} onPress={onPress} activeOpacity={0.85}>
-      <AvatarCluster initials={group.memberInitials} />
-      <View style={styles.chatRowContent}>
-        <View style={styles.chatRowTop}>
-          <View style={styles.chatRowNameWrap}>
-            <Text style={styles.chatRowName}>{group.name}</Text>
-            {group.isSystem && (
-              <View style={styles.systemTag}>
-                <Text style={styles.systemTagText}>AUTO</Text>
-              </View>
-            )}
-          </View>
-          <View style={styles.chatRowRight}>
-            <Text style={styles.chatRowTime}>{group.lastTime}</Text>
-            <UnreadBadge count={group.unread} />
-          </View>
+    <TouchableOpacity style={styles.chatCard} onPress={onPress} activeOpacity={0.85}>
+      <View style={styles.chatCardLeft}>
+        <AvatarCluster initials={group.memberInitials} />
+      </View>
+      <View style={styles.chatCardContent}>
+        <View style={styles.chatCardTop}>
+          <Text style={styles.chatCardName} numberOfLines={1}>{group.name}</Text>
+          <Text style={styles.chatCardTime}>{group.lastTime}</Text>
         </View>
-        <Text style={styles.chatRowSub}>{group.memberCount} members</Text>
-        <Text
-          style={[styles.chatRowPreview, group.unread > 0 && styles.chatRowPreviewUnread]}
-          numberOfLines={1}
-        >
+        <Text style={styles.chatCardSub} numberOfLines={1}>
+          {group.memberCount} members
+        </Text>
+        <Text style={[styles.chatCardPreview, group.unread > 0 && styles.chatCardPreviewBold]} numberOfLines={1}>
           {group.lastMsg}
         </Text>
       </View>
+      {group.unread > 0 && <UnreadBadge count={group.unread} />}
     </TouchableOpacity>
   );
 }
@@ -686,26 +680,21 @@ function GroupRow({ group, onPress }: { group: GroupThread; onPress: () => void 
 // ─── DM row ───────────────────────────────────────────────────────────────────
 function DMRow({ dm, onPress }: { dm: DMThread; onPress: () => void }) {
   return (
-    <TouchableOpacity style={styles.chatRow} onPress={onPress} activeOpacity={0.85}>
+    <TouchableOpacity style={styles.chatCard} onPress={onPress} activeOpacity={0.85}>
       <View style={styles.dmAvatarWrap}>
         <Avatar initials={dm.initials} size={44} free={dm.online} />
         {dm.online && <View style={styles.onlineDot} />}
       </View>
-      <View style={styles.chatRowContent}>
-        <View style={styles.chatRowTop}>
-          <Text style={styles.chatRowName}>{dm.name}</Text>
-          <View style={styles.chatRowRight}>
-            <Text style={styles.chatRowTime}>{dm.lastTime}</Text>
-            <UnreadBadge count={dm.unread} />
-          </View>
+      <View style={styles.chatCardContent}>
+        <View style={styles.chatCardTop}>
+          <Text style={styles.chatCardName} numberOfLines={1}>{dm.name}</Text>
+          <Text style={styles.chatCardTime}>{dm.lastTime}</Text>
         </View>
-        <Text
-          style={[styles.chatRowPreview, dm.unread > 0 && styles.chatRowPreviewUnread]}
-          numberOfLines={1}
-        >
+        <Text style={[styles.chatCardPreview, dm.unread > 0 && styles.chatCardPreviewBold]} numberOfLines={1}>
           {dm.lastMsg}
         </Text>
       </View>
+      {dm.unread > 0 && <UnreadBadge count={dm.unread} />}
     </TouchableOpacity>
   );
 }
@@ -896,29 +885,33 @@ function FriendRequestsTab({
 // ─── Friends full-screen view ─────────────────────────────────────────────────
 function FriendsView({ onBack }: { onBack: () => void }) {
   const { user } = useAuth();
+  const [dark, setDarkMode] = useState(isDark());
+  useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
+  const bg = dark ? DarkTheme.bg : Colors.lightGrey;
+  const textPrimary = dark ? DarkTheme.text : '#001845';
   if (!user) return null;
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <View style={styles.subViewHeader}>
-        <BackArrow onPress={onBack} />
-        <Text style={styles.subViewTitle}>ADD FRIENDS</Text>
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]} edges={['top']}>
+      <View style={[styles.subViewHeader, { backgroundColor: bg, borderBottomColor: dark ? DarkTheme.border : 'rgba(0,0,0,0.1)' }]}>
+        <TouchableOpacity style={[styles.backBtn, { backgroundColor: dark ? DarkTheme.surface : '#ECEEF3' }]} onPress={onBack} activeOpacity={0.75}>
+          <Ionicons name="chevron-back" size={20} color={textPrimary} />
+        </TouchableOpacity>
+        <Text style={[styles.subViewTitle, { color: textPrimary }]}>Add Friends</Text>
       </View>
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         <FriendSearch currentUserId={user.id} />
-        <View style={{ height: 120 }} />
+        <View style={{ height: 24 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 // ─── Chat screen ──────────────────────────────────────────────────────────────
-export default function ChatScreen({
-  pushView, popView, currentView,
-}: {
-  pushView: (view: string) => void;
-  popView: () => void;
-  currentView: string;
-}) {
+export default function ChatScreen() {
+  const [_viewStack, _setViewStack] = useState<string[]>(['main']);
+  const currentView = _viewStack[_viewStack.length - 1];
+  const pushView = (view: string) => _setViewStack(p => [...p, view]);
+  const popView = () => _setViewStack(p => (p.length > 1 ? p.slice(0, -1) : p));
   const { user } = useAuth();
   const [activeTab, setActiveTab]     = useState<'groups' | 'dms' | 'requests'>('groups');
   const [dmConvos, setDmConvos]       = useState<DMThread[]>([]);
@@ -988,6 +981,17 @@ export default function ChatScreen({
 
   const requestCount = requests.filter((r: any) => !acceptedIds.has(r.id)).length;
 
+  const [dark, setDarkMode] = useState(isDark());
+  useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
+
+  const bg = dark ? DarkTheme.bg : Colors.lightGrey;
+  const surface = dark ? DarkTheme.surface : '#ECEEF3';
+  const textPrimary = dark ? DarkTheme.text : '#001845';
+  const textMuted = dark ? DarkTheme.textMuted : Colors.gray500;
+
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening';
+
   if (currentView === 'thread' && selectedThread) {
     return (
       <ChatThread
@@ -1002,185 +1006,305 @@ export default function ChatScreen({
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      {/* Header */}
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]} edges={['top']}>
+
+      {/* ── Header ── */}
       <View style={styles.screenHeader}>
-        <Text style={styles.screenTitle}>CHAT</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.greeting, { color: textMuted }]}>{greeting}</Text>
+          <Text style={[styles.appName, { color: textPrimary }]}>IMPERIAL</Text>
+        </View>
         <TouchableOpacity
-          style={styles.addFriendsBtn}
+          style={[styles.bellBtn, dark && { backgroundColor: surface, borderColor: DarkTheme.border }]}
           onPress={() => pushView('friends')}
-          activeOpacity={0.85}
+          activeOpacity={0.8}
         >
-          <Text style={styles.addFriendsBtnText}>+ FRIENDS</Text>
+          <Ionicons name="notifications-outline" size={22} color={textPrimary} />
         </TouchableOpacity>
-        {/* Tab switcher */}
-        <View style={styles.tabSwitcher}>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'groups' && styles.tabActive]}
-            onPress={() => setActiveTab('groups')}
-          >
-            <Text style={[styles.tabText, activeTab === 'groups' && styles.tabTextActive]}>
-              GROUPS
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'dms' && styles.tabActive]}
-            onPress={() => setActiveTab('dms')}
-          >
-            <Text style={[styles.tabText, activeTab === 'dms' && styles.tabTextActive]}>
-              DMs
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'requests' && styles.tabActive]}
-            onPress={() => setActiveTab('requests')}
-          >
-            <View style={styles.tabWithBadge}>
-              <Text style={[styles.tabText, activeTab === 'requests' && styles.tabTextActive]}>
-                REQUESTS
-              </Text>
-              {requestCount > 0 && (
-                <View style={styles.tabBadge}>
-                  <Text style={styles.tabBadgeText}>{requestCount > 9 ? '9+' : requestCount}</Text>
-                </View>
-              )}
+      </View>
+
+      {/* ── Add new row ── */}
+      <View style={styles.addRow}>
+        <Text style={[styles.addLabel, { color: textPrimary }]}>Add new</Text>
+        <TouchableOpacity style={styles.addCircleBtn} onPress={() => pushView('friends')} activeOpacity={0.85}>
+          <Ionicons name="add" size={22} color="#FFFFFF" />
+        </TouchableOpacity>
+      </View>
+
+      {/* ── Friends icon + Groups / Direct toggle ── */}
+      <View style={styles.filterRow}>
+        <TouchableOpacity
+          onPress={() => { setActiveTab('requests'); }}
+          activeOpacity={0.8}
+          style={styles.friendsIconBtn}
+        >
+          <Ionicons name="people" size={28} color={textPrimary} />
+          {requestCount > 0 && (
+            <View style={styles.friendsIconBadge}>
+              <Text style={styles.friendsIconBadgeText}>{requestCount > 9 ? '9+' : requestCount}</Text>
             </View>
-          </TouchableOpacity>
+          )}
+        </TouchableOpacity>
+
+        {/* Pill segmented control */}
+        <View style={[styles.segmented, { backgroundColor: surface }]}>
+          {(['groups', 'dms'] as const).map(tab => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.segment, activeTab === tab && styles.segmentActive]}
+              onPress={() => setActiveTab(tab)}
+              activeOpacity={0.85}
+            >
+              <Text style={[styles.segmentText, activeTab === tab && styles.segmentTextActive]}>
+                {tab === 'groups' ? 'Groups' : 'Direct'}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
 
+      {/* ── Chat list / requests ── */}
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {activeTab === 'groups'
-          ? (
-            <View style={styles.groupsEmpty}>
-              <Text style={styles.groupsEmptyText}>No group chats yet.</Text>
-              <TouchableOpacity
-                style={styles.groupsCreateBtn}
-                onPress={() => showToast('Group creation coming soon!')}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.groupsCreateBtnText}>CREATE GROUP</Text>
-              </TouchableOpacity>
-            </View>
-          )
-          : activeTab === 'dms'
-          ? loadingDms
-            ? <ActivityIndicator color={Colors.navy} style={{ marginTop: 40 }} />
-            : dmConvos.length === 0
-            ? (
-              <View style={styles.dmsEmpty}>
-                <Text style={styles.dmsEmptyText}>No messages yet.</Text>
-                <Text style={styles.dmsEmptyHint}>Find friends in Search and start a conversation.</Text>
-              </View>
-            )
-            : dmConvos.map(d => (
-                <DMRow key={d.id} dm={d} onPress={() => { setSelectedThread(d); pushView('thread'); }} />
-              ))
-          : (
-              <FriendRequestsTab
-                requests={requests}
-                acceptedIds={acceptedIds}
-                onAccept={handleAccept}
-                onDecline={handleDecline}
-              />
-            )
-        }
-        <View style={{ height: 120 }} />
+        {activeTab === 'requests' ? (
+          <>
+            <Text style={[styles.listSectionLabel, { color: textMuted }]}>FRIEND REQUESTS</Text>
+            <FriendRequestsTab
+              requests={requests}
+              acceptedIds={acceptedIds}
+              onAccept={handleAccept}
+              onDecline={handleDecline}
+            />
+          </>
+        ) : activeTab === 'groups' ? (
+          <View style={styles.emptyState}>
+            <Text style={[styles.emptyStateText, { color: textPrimary }]}>No group chats yet.</Text>
+            <TouchableOpacity
+              style={styles.emptyStateBtn}
+              onPress={() => showToast('Group creation coming soon!')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.emptyStateBtnText}>Create Group</Text>
+            </TouchableOpacity>
+          </View>
+        ) : loadingDms ? (
+          <ActivityIndicator color="#001845" style={{ marginTop: 40 }} />
+        ) : dmConvos.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={[styles.emptyStateText, { color: textPrimary }]}>No messages yet.</Text>
+            <Text style={[styles.emptyStateHint, { color: textMuted }]}>
+              Add friends and start a conversation.
+            </Text>
+          </View>
+        ) : (
+          dmConvos.map(d => (
+            <DMRow key={d.id} dm={d} onPress={() => { setSelectedThread(d); pushView('thread'); }} />
+          ))
+        )}
+        <View style={{ height: 40 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: Colors.white },
+const NAVY = '#001845';
 
-  // Screen header + tab switcher
+const styles = StyleSheet.create({
+  safe: { flex: 1 },
+
+  // Header
   screenHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     paddingHorizontal: 20,
     paddingTop: 16,
     paddingBottom: 0,
+    marginBottom: 8,
+  },
+  greeting: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.medium,
+    letterSpacing: 0.3,
+    marginBottom: 2,
+  },
+  appName: {
+    fontSize: 30,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+  },
+  bellBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    backgroundColor: Colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+  },
+
+  // Add new row
+  addRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 16,
+    justifyContent: 'flex-end',
+    paddingHorizontal: 20,
+    marginBottom: 20,
+    gap: 10,
   },
-  screenTitle: {
-    fontSize: Typography.sizes.xxl,
-    fontWeight: Typography.weights.black,
-    color: Colors.navy,
-    letterSpacing: -1,
-    marginRight: 'auto',
+  addLabel: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.bold,
   },
-  addFriendsBtn: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    flexShrink: 0,
-    ...Shadows.sm,
+  addCircleBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: NAVY,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  addFriendsBtnText: {
-    fontSize: Typography.sizes.xs,
-    fontWeight: Typography.weights.black,
-    letterSpacing: 1,
-    color: Colors.white,
-  },
-  subViewHeader: {
+
+  // Filter row (friends icon + segmented control)
+  filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: Borders.widthHeavy,
-    borderBottomColor: Colors.black,
-    backgroundColor: Colors.white,
+    marginBottom: 16,
     gap: 14,
-    ...Shadows.sm,
   },
-  subViewTitle: {
-    fontSize: Typography.sizes.xl,
+  friendsIconBtn: {
+    position: 'relative',
+    padding: 4,
+  },
+  friendsIconBadge: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: Colors.red,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  friendsIconBadgeText: {
+    fontSize: 9,
     fontWeight: Typography.weights.black,
-    color: Colors.navy,
-    letterSpacing: -0.5,
+    color: '#FFFFFF',
   },
-  tabSwitcher: {
+
+  // Pill segmented control (Groups / Direct)
+  segmented: {
+    flex: 1,
     flexDirection: 'row',
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
-    overflow: 'hidden',
-    ...Shadows.sm,
+    borderRadius: 20,
+    padding: 3,
   },
-  tab: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: Colors.white,
+  segment: {
+    flex: 1,
+    borderRadius: 18,
+    paddingVertical: 9,
+    alignItems: 'center',
   },
-  tabActive: { backgroundColor: Colors.navy },
-  tabText: {
-    fontSize: Typography.sizes.xs,
+  segmentActive: {
+    backgroundColor: NAVY,
+  },
+  segmentText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.bold,
+    color: Colors.gray500,
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
     fontWeight: Typography.weights.black,
-    letterSpacing: 1.5,
-    color: Colors.navy,
   },
-  tabTextActive: { color: Colors.white },
+
+  // Section label above requests list
+  listSectionLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2.5,
+    marginBottom: 14,
+    marginTop: 4,
+  },
 
   // List
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 20 },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 4 },
 
-  // Avatar
+  // Dark navy chat card (shared by group + DM rows)
+  chatCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NAVY,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    marginBottom: 10,
+    gap: 14,
+  },
+  chatCardLeft: { flexShrink: 0 },
+  chatCardContent: { flex: 1 },
+  chatCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 3,
+  },
+  chatCardName: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+    flex: 1,
+    marginRight: 8,
+  },
+  chatCardTime: {
+    fontSize: Typography.sizes.xs,
+    color: 'rgba(255,255,255,0.45)',
+    fontWeight: Typography.weights.medium,
+    flexShrink: 0,
+  },
+  chatCardSub: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.45)',
+    fontWeight: Typography.weights.medium,
+    marginBottom: 2,
+  },
+  chatCardPreview: {
+    fontSize: Typography.sizes.sm,
+    color: 'rgba(255,255,255,0.55)',
+    fontWeight: Typography.weights.medium,
+  },
+  chatCardPreviewBold: {
+    color: '#FFFFFF',
+    fontWeight: Typography.weights.bold,
+  },
+
+  // DM avatar wrap
+  dmAvatarWrap: { position: 'relative', flexShrink: 0 },
+  onlineDot: {
+    position: 'absolute',
+    bottom: 2, right: 2,
+    width: 11, height: 11,
+    borderRadius: 6,
+    backgroundColor: Colors.green,
+    borderWidth: 2,
+    borderColor: NAVY,
+  },
+
+  // Avatar (used in cluster + chat thread)
   avatar: {
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: Colors.black,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   avatarText: { fontWeight: Typography.weights.black },
 
@@ -1190,94 +1314,71 @@ const styles = StyleSheet.create({
 
   // Unread badge
   unreadBadge: {
-    minWidth: 18, height: 18,
-    borderRadius: 9,
-    backgroundColor: Colors.navy,
-    borderWidth: 1.5,
-    borderColor: Colors.black,
+    minWidth: 20, height: 20,
+    borderRadius: 10,
+    backgroundColor: Colors.red,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 4,
+    paddingHorizontal: 5,
+    flexShrink: 0,
   },
   unreadText: {
     fontSize: 10,
     fontWeight: Typography.weights.black,
-    color: Colors.white,
+    color: '#FFFFFF',
   },
 
-  // Chat row (shared by group + DM)
-  chatRow: {
+  // Sub-view header (Add Friends screen)
+  subViewHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
-    padding: 14,
-    marginBottom: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     gap: 14,
-    ...Shadows.sm,
   },
-  chatRowContent: { flex: 1 },
-  chatRowTop: {
-    flexDirection: 'row',
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 2,
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-  chatRowNameWrap: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 },
-  chatRowName: {
+  subViewTitle: {
+    fontSize: 20,
+    fontWeight: Typography.weights.black,
+    letterSpacing: -0.3,
+  },
+
+  // Empty states
+  emptyState: {
+    paddingVertical: 60,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    gap: 16,
+  },
+  emptyStateText: {
     fontSize: Typography.sizes.md,
     fontWeight: Typography.weights.black,
-    color: Colors.navy,
-    flexShrink: 1,
   },
-  chatRowSub: {
-    fontSize: 11,
-    color: Colors.gray500,
-    fontWeight: Typography.weights.medium,
-    marginBottom: 2,
-  },
-  chatRowPreview: {
+  emptyStateHint: {
     fontSize: Typography.sizes.sm,
-    color: Colors.gray500,
-    lineHeight: 18,
+    textAlign: 'center',
+    lineHeight: 20,
   },
-  chatRowPreviewUnread: {
-    color: Colors.navy,
-    fontWeight: Typography.weights.bold,
+  emptyStateBtn: {
+    backgroundColor: NAVY,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    alignItems: 'center',
   },
-  chatRowRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  chatRowTime: {
-    fontSize: Typography.sizes.xs,
-    color: Colors.gray500,
-    fontWeight: Typography.weights.medium,
-  },
-  systemTag: {
-    backgroundColor: Colors.bluePale,
-    borderRadius: Borders.radiusSm,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: Colors.black,
-  },
-  systemTagText: {
-    fontSize: 9,
+  emptyStateBtnText: {
+    fontSize: Typography.sizes.sm,
     fontWeight: Typography.weights.black,
-    letterSpacing: 1,
-    color: Colors.navy,
-  },
-
-  // DM row extras
-  dmAvatarWrap: { position: 'relative', flexShrink: 0 },
-  onlineDot: {
-    position: 'absolute',
-    bottom: 2, right: 2,
-    width: 11, height: 11,
-    borderRadius: 6,
-    backgroundColor: Colors.green,
-    borderWidth: 2,
-    borderColor: Colors.white,
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
   },
 
   // Thread layout
@@ -1291,17 +1392,6 @@ const styles = StyleSheet.create({
     borderBottomColor: Colors.black,
     backgroundColor: Colors.white,
     gap: 12,
-    ...Shadows.sm,
-  },
-  backBtn: {
-    width: 40, height: 40,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.white,
-    flexShrink: 0,
     ...Shadows.sm,
   },
   backArrow: {
@@ -1575,7 +1665,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 100,
+    paddingBottom: 20,
     gap: 10,
     borderTopWidth: Borders.widthHeavy,
     borderTopColor: Colors.black,
