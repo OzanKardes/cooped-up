@@ -12,20 +12,13 @@ import { Colors, Typography } from '../../constants/theme';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
 import { useFriends } from '../../hooks/useFriends';
-import { updateProfile, getPlanCount, getFriendCount, uploadAvatar } from '../../services/users';
+import { updateProfile, getPlanCount, getFriendCount, uploadAvatar, getAllBadges, getUserBadges } from '../../services/users';
+import { Badge } from '../../types';
 import { setDark, isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
 
 const DARK = '#001845';
 
-// ─── Hardcoded data ───────────────────────────────────────────────────────────
-const BADGES = [
-  { id: '1', emoji: '🌞', label: 'Sunshine Chaser',  desc: '10+ outdoor plans' },
-  { id: '2', emoji: '👥', label: 'Social Butterfly',  desc: '20+ friends' },
-  { id: '3', emoji: '🌧', label: 'Rain Warrior',      desc: 'Planned in bad weather' },
-  { id: '4', emoji: '🎯', label: '5 Week Streak',     desc: 'Consistent planner' },
-  { id: '5', emoji: '🏆', label: 'Top Planner',       desc: 'Created 10+ plans' },
-  { id: '6', emoji: '🧭', label: 'Explorer',           desc: '5+ different spaces' },
-];
+// Badges are loaded from the backend; fallback empty list until loaded
 
 const PAST_PLANS_FULL = [
   { title: 'Frisbee on the Lawn', date: 'May 10', attendees: 4, loc: "Queen's Lawn"    },
@@ -204,6 +197,9 @@ export default function ProfileScreen() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const profileInitialized = useRef(false);
 
+  const [badges, setBadges] = useState<Badge[]>([]);
+  const [earnedMap, setEarnedMap] = useState<Record<string, boolean>>({});
+
   // Only sync from profile on first load — never let a background re-fetch overwrite local edits
   useEffect(() => {
     if (!profile || profileInitialized.current) return;
@@ -218,6 +214,20 @@ export default function ProfileScreen() {
     if (!user) return;
     getPlanCount(user.id).then(setPlanCount).catch(() => {});
     getFriendCount(user.id).then(setFriendCount).catch(() => {});
+
+    // Load badges and which ones the user has earned
+    (async () => {
+      try {
+        const all = await getAllBadges();
+        const userBadges = await getUserBadges(user.id);
+        setBadges(all);
+        const map: Record<string, boolean> = {};
+        userBadges.forEach(ub => { if (ub.badge && ub.badge.id) map[ub.badge.id] = true; });
+        setEarnedMap(map);
+      } catch {
+        // ignore — badges will remain empty
+      }
+    })();
   }, [user?.id]);
 
   const [notifOn,    setNotifOn]    = useState(true);
@@ -424,12 +434,18 @@ export default function ProfileScreen() {
         {/* ── Badges ── */}
         <Text style={[styles.sectionHeader, { color: textPrimary }]}>Badges</Text>
         <View style={styles.badgeRow}>
-          {BADGES.map(badge => (
-            <View key={badge.id} style={[styles.badgeTile, { backgroundColor: surfaceAlt }]}>
-              <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
-              <Text style={[styles.badgeLabel, { color: textPrimary }]}>{badge.label}</Text>
-            </View>
-          ))}
+          {badges.map(badge => {
+            const earned = !!earnedMap[badge.id];
+            return (
+              <View key={badge.id} style={[styles.badgeTile, { backgroundColor: surfaceAlt, opacity: earned ? 1 : 0.38 }]}>
+                <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
+                <Text style={[styles.badgeLabel, { color: textPrimary }]}>{badge.label}</Text>
+                {earned && badge.description ? (
+                  <Text style={[styles.badgeDesc, { color: textMuted }]}>{badge.description}</Text>
+                ) : null}
+              </View>
+            );
+          })}
         </View>
 
         {/* ── Settings ── */}
@@ -623,6 +639,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: Typography.weights.bold,
     textAlign: 'center',
+  },
+  badgeDesc: {
+    fontSize: 10,
+    textAlign: 'center',
+    marginTop: 6,
   },
 
   // Settings toggles

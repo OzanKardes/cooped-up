@@ -317,3 +317,46 @@ create trigger on_auth_user_created
 --
 -- Re-apply the fixed trigger (handles single-word names, no-letter names):
 -- (paste the full create or replace function block above, then run it)
+
+-- ─── Badges & user awards ──────────────────────────────────────────────────
+create table public.badges (
+  id uuid default gen_random_uuid() primary key,
+  key text not null unique,
+  emoji text not null,
+  label text not null,
+  description text,
+  created_at timestamp with time zone default now()
+);
+
+create table public.user_badges (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  badge_id uuid references public.badges(id) on delete cascade not null,
+  awarded_at timestamp with time zone default now(),
+  unique(user_id, badge_id)
+);
+
+alter table public.badges enable row level security;
+alter table public.user_badges enable row level security;
+
+create policy "Public can view badges"
+  on public.badges for select
+  using (true);
+
+create policy "Users can view own user_badges"
+  on public.user_badges for select
+  using (auth.uid() = user_id);
+
+create policy "Users can insert their own user_badges"
+  on public.user_badges for insert
+  with check (auth.uid() = user_id);
+
+-- Seed a few common badges (run once)
+insert into public.badges (key, emoji, label, description)
+values
+  ('first_time_user', '✨', 'First Steps', 'Welcome aboard — first time user'),
+  ('created_plan',     '🏆', 'Top Planner', 'Created 10+ plans'),
+  ('social_butterfly', '👥', 'Social Butterfly', '20+ friends'),
+  ('sunshine_chaser',  '🌞', 'Sunshine Chaser', '10+ outdoor plans')
+on conflict (key) do nothing;
+

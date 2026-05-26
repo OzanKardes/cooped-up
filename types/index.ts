@@ -87,6 +87,24 @@ export interface Message {
   sender?: User;
 }
 
+export interface Badge {
+  id: string;
+  key: string;
+  emoji: string;
+  label: string;
+  description?: string | null;
+  created_at: string;
+}
+
+export interface UserBadge {
+  id: string;
+  user_id: string;
+  badge_id: string;
+  awarded_at: string;
+  // joined
+  badge?: Badge;
+}
+
 // ─── UI helper types (not from DB) ────────────────────────────────────────────
 
 export interface FriendWithStatus extends User {

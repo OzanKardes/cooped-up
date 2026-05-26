@@ -1,5 +1,5 @@
 import { supabase } from '../lib/supabase';
-import { User } from '../types';
+import { User, Badge, UserBadge } from '../types';
 import { showToast } from '../components/Toast';
 import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
@@ -101,5 +101,46 @@ export async function getFriendCount(userId: string): Promise<number> {
     return count ?? 0;
   } catch {
     return 0;
+  }
+}
+
+// ─── Badges / awards ───────────────────────────────────────────────────────
+
+export async function getAllBadges(): Promise<Badge[]> {
+  try {
+    const { data, error } = await supabase
+      .from('badges')
+      .select('*')
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    return (data ?? []) as Badge[];
+  } catch {
+    return [];
+  }
+}
+
+export async function getUserBadges(userId: string): Promise<UserBadge[]> {
+  try {
+    const { data, error } = await supabase
+      .from('user_badges')
+      .select('*, badge:badges(*)')
+      .eq('user_id', userId);
+    if (error) throw error;
+    return (data ?? []) as UserBadge[];
+  } catch {
+    return [];
+  }
+}
+
+export async function awardBadge(userId: string, badgeId: string) {
+  try {
+    const { error } = await supabase
+      .from('user_badges')
+      .insert({ user_id: userId, badge_id: badgeId })
+      .onConflict(['user_id', 'badge_id']);
+    if (error) throw error;
+    showToast('Badge awarded!');
+  } catch (err) {
+    // ignore duplicate / permission errors silently in UI flows
   }
 }
