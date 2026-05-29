@@ -638,8 +638,13 @@ export function CreatePlanModal({
   const [selectedDuration, setSelectedDuration] = useState(60);
   const [selectedLocation, setSelectedLocation] = useState('');
   const [selectedActivity, setSelectedActivity] = useState('');
+  const [customActivityName, setCustomActivityName] = useState('');
+  const [customActivityEmoji, setCustomActivityEmoji] = useState('✨');
   const [createGroupChat, setCreateGroupChat] = useState(true);
   const [creating, setCreating] = useState(false);
+
+  const CUSTOM_ID = '__custom__';
+  const QUICK_EMOJIS = ['✨','🎉','🏃','🎨','🎵','🍕','🌳','📸','🏊','🎮','🛒','🎤','🌅','🎯','🏋️','🤸','🧘','🎲','🌮','🎪'];
 
   useEffect(() => {
     if (visible) {
@@ -647,6 +652,7 @@ export function CreatePlanModal({
       setStep(1); setSelectedFriends([]);
       setSelectedSlot(initSlot); setSelectedDuration(60);
       setSelectedLocation(initialValues?.location ?? ''); setSelectedActivity('');
+      setCustomActivityName(''); setCustomActivityEmoji('✨');
       setCreateGroupChat(true); setCreating(false);
       if (initSlot.startsWith('tmr_')) setSelectedDay('tomorrow');
       else if (['thu','fri','sat','sun'].includes(initSlot)) setSelectedDay('week');
@@ -659,9 +665,14 @@ export function CreatePlanModal({
 
   const selectedFriendObjs = friends.filter(f => selectedFriends.includes(f.id));
 
-  const autoTitle = [selectedActivity, selectedLocation ? `at ${selectedLocation}` : ''].filter(Boolean).join(' ') || 'Hangout';
+  const activityLabel = selectedActivity === CUSTOM_ID ? customActivityName.trim() : selectedActivity;
+  const activityIcon  = selectedActivity === CUSTOM_ID ? customActivityEmoji : (ACTIVITIES.find(a => a.label === selectedActivity)?.icon ?? '');
+  const autoTitle = [activityLabel, selectedLocation ? `at ${selectedLocation}` : ''].filter(Boolean).join(' ') || 'Hangout';
 
-  const canNext = step === 2 ? !!selectedSlot : step === 3 ? !!selectedLocation : step === 4 ? !!selectedActivity : true;
+  const canNext = step === 2 ? !!selectedSlot
+    : step === 3 ? !!selectedLocation
+    : step === 4 ? (!!selectedActivity && (selectedActivity !== CUSTOM_ID || customActivityName.trim() !== ''))
+    : true;
 
   const handleCreate = async () => {
     if (creating) return;
@@ -863,22 +874,88 @@ export function CreatePlanModal({
 
             {/* ── Step 4: Activity ── */}
             {step === 4 && (
-              <View style={mst.actGrid}>
-                {ACTIVITIES.map(act => {
-                  const sel = selectedActivity === act.label;
-                  return (
-                    <TouchableOpacity
-                      key={act.id}
-                      style={[mst.actBox, sel && mst.actBoxSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
-                      onPress={() => setSelectedActivity(act.label)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={mst.actIcon}>{act.icon}</Text>
-                      <Text style={[mst.actLabel, sel ? mst.actLabelSel : { color: textCol }]}>{act.label}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+              <>
+                <View style={mst.actGrid}>
+                  {ACTIVITIES.map(act => {
+                    const sel = selectedActivity === act.label;
+                    return (
+                      <TouchableOpacity
+                        key={act.id}
+                        style={[mst.actBox, sel && mst.actBoxSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                        onPress={() => setSelectedActivity(act.label)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={mst.actIcon}>{act.icon}</Text>
+                        <Text style={[mst.actLabel, sel ? mst.actLabelSel : { color: textCol }]}>{act.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* Custom tile */}
+                  {(() => {
+                    const sel = selectedActivity === CUSTOM_ID;
+                    const displayEmoji = sel ? customActivityEmoji : '✏️';
+                    return (
+                      <TouchableOpacity
+                        style={[mst.actBox, sel && mst.actBoxSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                        onPress={() => setSelectedActivity(CUSTOM_ID)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={mst.actIcon}>{displayEmoji}</Text>
+                        <Text style={[mst.actLabel, sel ? mst.actLabelSel : { color: textCol }]}>Custom</Text>
+                      </TouchableOpacity>
+                    );
+                  })()}
+                </View>
+
+                {/* Custom activity inputs — shown when Custom tile is selected */}
+                {selectedActivity === CUSTOM_ID && (
+                  <View style={[mst.customActWrap, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+                    {/* Name input */}
+                    <Text style={[mst.customActLabel, { color: mutedCol }]}>ACTIVITY NAME</Text>
+                    <TextInput
+                      style={[mst.customActInput, { color: textCol, borderColor: cardBorder, backgroundColor: dark ? '#0C1829' : Colors.gray100 }]}
+                      value={customActivityName}
+                      onChangeText={setCustomActivityName}
+                      placeholder="e.g. Rooftop sunset"
+                      placeholderTextColor={mutedCol}
+                      maxLength={30}
+                      autoCapitalize="words"
+                      returnKeyType="done"
+                    />
+
+                    {/* Emoji picker */}
+                    <Text style={[mst.customActLabel, { color: mutedCol, marginTop: 14 }]}>PICK AN EMOJI</Text>
+                    <View style={mst.emojiPickerRow}>
+                      {/* Quick-select chips */}
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={mst.emojiScroll}>
+                        {QUICK_EMOJIS.map(em => (
+                          <TouchableOpacity
+                            key={em}
+                            style={[mst.emojiChip, customActivityEmoji === em && { backgroundColor: Colors.navy, borderColor: Colors.navy }]}
+                            onPress={() => setCustomActivityEmoji(em)}
+                            activeOpacity={0.75}
+                          >
+                            <Text style={mst.emojiChipText}>{em}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    </View>
+                    {/* Type-your-own fallback */}
+                    <View style={[mst.emojiTypeRow, { borderColor: cardBorder }]}>
+                      <Text style={[mst.emojiTypeLabel, { color: mutedCol }]}>Or type one:</Text>
+                      <TextInput
+                        style={[mst.emojiTypeInput, { color: textCol }]}
+                        value={customActivityEmoji}
+                        onChangeText={v => setCustomActivityEmoji(v.slice(-2) || v)}
+                        maxLength={2}
+                        placeholder="✨"
+                        placeholderTextColor={mutedCol}
+                      />
+                    </View>
+                  </View>
+                )}
+              </>
             )}
 
             {/* ── Step 5: Summary ── */}
@@ -917,7 +994,9 @@ export function CreatePlanModal({
                   <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
                     <Text style={[mst.summaryKey, { color: mutedCol }]}>ACTIVITY</Text>
-                    <Text style={[mst.summaryVal, { color: textCol }]}>{selectedActivity || '—'}</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]}>
+                      {activityIcon ? `${activityIcon}  ` : ''}{activityLabel || '—'}
+                    </Text>
                   </View>
                 </View>
 
@@ -2283,6 +2362,55 @@ const mst = StyleSheet.create({
   actIcon: { fontSize: 24 },
   actLabel: { fontSize: 11, fontWeight: Typography.weights.black, color: Colors.navy, textAlign: 'center' },
   actLabelSel: { color: '#FFFFFF' },
+
+  // Custom activity
+  customActWrap: {
+    borderWidth: 1.5,
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  customActLabel: {
+    fontSize: 9,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+    marginBottom: 8,
+  },
+  customActInput: {
+    borderWidth: 1.5,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.bold,
+  },
+  emojiPickerRow: { marginBottom: 4 },
+  emojiScroll: { gap: 6, paddingBottom: 4 },
+  emojiChip: {
+    width: 42, height: 42,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.gray100,
+  },
+  emojiChipText: { fontSize: 22 },
+  emojiTypeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderTopWidth: 1,
+    paddingTop: 10,
+    marginTop: 6,
+  },
+  emojiTypeLabel: { fontSize: 11, fontWeight: Typography.weights.medium },
+  emojiTypeInput: {
+    fontSize: 26,
+    width: 42,
+    textAlign: 'center',
+  },
 
   // Step 5 — summary
   summaryCard: {

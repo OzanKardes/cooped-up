@@ -1,4 +1,4 @@
-import { View, Text, PanResponder, Animated, Dimensions, TouchableOpacity, Platform, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useState, useRef, useEffect } from 'react';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,7 +20,6 @@ import { checkTourCompleted, markTourComplete, resetTourForUser } from '../../se
 import { supabase } from '../../lib/supabase';
 import { showToast } from '../../components/Toast';
 
-const { width } = Dimensions.get('window');
 const IMPERIAL = '#001845';
 const INITIAL  = 2; // start on Home
 
@@ -37,13 +36,8 @@ export default function TabLayout() {
   const tabBarH = (Platform.OS === 'ios' ? 56 : 60) + insets.bottom;
 
   const [activeTab, setActiveTab] = useState(INITIAL);
-  const translateX = useRef(new Animated.Value(-INITIAL * width)).current;
-  const activeRef  = useRef(INITIAL);
 
-  // Shared modal-open ref — written by every screen, read by the PanResponder.
-  // A ref (not state) so the PanResponder closure can always see the latest value.
-  const modalOpenRef = useRef(false);
-  const handleModalChange = (open: boolean) => { modalOpenRef.current = open; };
+  const handleModalChange = (_open: boolean) => {};
 
   // ── Tour state ────────────────────────────────────────────────────────────
   const [tourActive, setTourActive] = useState(false);
@@ -183,94 +177,42 @@ export default function TabLayout() {
   };
 
   const goTo = (index: number) => {
-    activeRef.current = index;
     setActiveTab(index);
-    Animated.spring(translateX, {
-      toValue: -index * width,
-      useNativeDriver: true,
-      damping: 20,
-      stiffness: 180,
-      overshootClamping: true,
-    }).start();
   };
-
-  const swipe = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => !modalOpenRef.current,
-      onMoveShouldSetPanResponderCapture: (_, { dx, dy }) => {
-        // Block when any modal is open
-        if (modalOpenRef.current) return false;
-        // Block tab-switching swipe when a screen is in a sub-view
-        if (activeRef.current === 3 && chatNavRef.inSubView) return false;
-        return Math.abs(dx) > Math.abs(dy) * 3 && Math.abs(dx) > 12;
-      },
-
-      onPanResponderGrant: () => {
-        translateX.stopAnimation();
-      },
-
-      onPanResponderMove: (_, { dx }) => {
-        const base = -activeRef.current * width;
-        const raw  = base + dx;
-        const min  = -(TABS.length - 1) * width;
-        const max  = 0;
-        // rubber-band past the first/last tab
-        const val = raw < min ? min + (raw - min) * 0.15
-                  : raw > max ? (raw)      * 0.15
-                  : raw;
-        translateX.setValue(val);
-      },
-
-      onPanResponderRelease: (_, { dx, vx }) => {
-        const curr = activeRef.current;
-        let target = curr;
-        if      (dx < -width * 0.3 || vx < -0.5) target = Math.min(curr + 1, TABS.length - 1);
-        else if (dx >  width * 0.3 || vx >  0.5) target = Math.max(curr - 1, 0);
-        goTo(target);
-      },
-
-      onPanResponderTerminate: () => goTo(activeRef.current),
-    })
-  ).current;
 
   return (
     <View style={{ flex: 1, backgroundColor: IMPERIAL }}>
 
-      {/* ── Pager ── */}
-      <View style={{ flex: 1, overflow: 'hidden' }}>
-        <Animated.View
-          style={[styles.pager, { width: width * TABS.length, transform: [{ translateX }] }]}
-          {...swipe.panHandlers}
-        >
-          {TABS.map(({ Component }, i) => (
-            <View key={i} style={{ width, flex: 1 }}>
-              {i === 2 ? (
-                <HomeScreen
-                  onModalChange={handleModalChange}
-                  homeTourRefs={homeTourRefs}
-                />
-              ) : i === 4 ? (
-                <ProfileScreen
-                  onModalChange={handleModalChange}
-                  profileTourRefs={profileTourRefs}
-                  onRedoTour={() => {
-                    supabase.auth.getSession().then(({ data: { session } }) => {
-                      if (session?.user) {
-                        resetTourForUser(session.user.id).then(() => {
-                          setTourKey(prev => prev + 1);
-                          setTourActive(true);
-                          goTo(2);
-                        });
-                      }
-                    });
-                  }}
-                />
-              ) : (
-                <Component onModalChange={handleModalChange} />
-              )}
-            </View>
-          ))}
-        </Animated.View>
+      {/* ── Screens ── */}
+      <View style={{ flex: 1 }}>
+        {TABS.map(({ Component }, i) => (
+          <View key={i} style={[StyleSheet.absoluteFillObject, { display: i === activeTab ? 'flex' : 'none' }]}>
+            {i === 2 ? (
+              <HomeScreen
+                onModalChange={handleModalChange}
+                homeTourRefs={homeTourRefs}
+              />
+            ) : i === 4 ? (
+              <ProfileScreen
+                onModalChange={handleModalChange}
+                profileTourRefs={profileTourRefs}
+                onRedoTour={() => {
+                  supabase.auth.getSession().then(({ data: { session } }) => {
+                    if (session?.user) {
+                      resetTourForUser(session.user.id).then(() => {
+                        setTourKey(prev => prev + 1);
+                        setTourActive(true);
+                        goTo(2);
+                      });
+                    }
+                  });
+                }}
+              />
+            ) : (
+              <Component onModalChange={handleModalChange} />
+            )}
+          </View>
+        ))}
       </View>
 
       {/* ── Tab bar ── */}
@@ -340,10 +282,6 @@ export default function TabLayout() {
 }
 
 const styles = StyleSheet.create({
-  pager: {
-    flexDirection: 'row',
-    flex: 1,
-  },
   tabBar: {
     flexDirection: 'row',
     backgroundColor: IMPERIAL,
