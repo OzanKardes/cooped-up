@@ -1,22 +1,37 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, Animated, Modal, ActivityIndicator, Image,
-  ActionSheetIOS, Platform, Alert,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TouchableWithoutFeedback,
+  TextInput, Animated, Modal, ActivityIndicator, Image, RefreshControl,
+  ActionSheetIOS, Platform, Alert, Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { Colors, Typography } from '../../constants/theme';
+import { Colors, Typography, Shadows } from '../../constants/theme';
+
+const DARK = '#001845';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
 import { useFriends } from '../../hooks/useFriends';
-import { updateProfile, getPlanCount, getFriendCount, uploadAvatar, getAllBadges, getUserBadges } from '../../services/users';
-import { Badge } from '../../types';
+import { updateProfile, uploadAvatar, getFriendCount, getPlanCount } from '../../services/users';
+import { getMessagesCount } from '../../services/messages';
 import { setDark, isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
+import {
+  ALL_BADGES, getUserBadges, TIER_COLORS, TIER_LABELS,
+  type BadgeDef, type BadgeTier,
+} from '../../services/badges';
+import { onBadgeUnlocked } from '../../lib/badgeQueue';
+import { supabase } from '../../lib/supabase';
 
-const DARK = '#001845';
+
+const { width } = Dimensions.get('window');
+const GRID_GAP = 8;
+const COLS = 4;
+const CARD_W = Math.floor((width - 40 - GRID_GAP * (COLS - 1)) / COLS);
+const LOCKED_BG = '#1A1A2E';
+const TIER_ORDER: Record<string, number> = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
+const FILTER_OPTIONS = ['ALL', 'bronze', 'silver', 'gold', 'platinum'] as const;
 
 // Badges are loaded from the backend; fallback empty list until loaded
 
@@ -78,7 +93,7 @@ function StatDetail({ stat, onBack }: { stat: 'plans' | 'friends' | 'hours'; onB
   const maxFriendPlanCount = Math.max(...friends.map(f => (f as any).plan_count ?? 0), 1);
 
   const bg = dark ? DarkTheme.bg : Colors.lightGrey;
-  const surface = dark ? DarkTheme.surface : '#ECEEF3';
+  const surface = dark ? DarkTheme.surface : Colors.white;
   const textPrimary = dark ? DarkTheme.text : DARK;
   const textMuted = dark ? DarkTheme.textMuted : Colors.gray500;
 
@@ -96,7 +111,7 @@ function StatDetail({ stat, onBack }: { stat: 'plans' | 'friends' | 'hours'; onB
           <>
             <Text style={[styles.detailSectionLabel, { color: textMuted }]}>PLANS PER WEEK</Text>
             <View style={[styles.chartCard, { backgroundColor: surface }]}>
-              <BarChart data={WEEK_PLANS} labels={WEEK_LABELS} color={DARK} />
+              <BarChart data={WEEK_PLANS} labels={WEEK_LABELS} color={Colors.navy} />
             </View>
             <Text style={[styles.detailSectionLabel, { marginTop: 24, color: textMuted }]}>ALL PAST PLANS</Text>
             {PAST_PLANS_FULL.map((p, i) => (
@@ -115,7 +130,7 @@ function StatDetail({ stat, onBack }: { stat: 'plans' | 'friends' | 'hours'; onB
           <>
             <Text style={[styles.detailSectionLabel, { color: textMuted }]}>FRIENDS BY PLANS TOGETHER</Text>
             {friendsLoading ? (
-              <ActivityIndicator color={DARK} style={{ marginTop: 20 }} />
+              <ActivityIndicator color={Colors.navy} style={{ marginTop: 20 }} />
             ) : friends.length === 0 ? (
               <Text style={[styles.detailRowSub, { color: textMuted }]}>No friends yet — add some in Chat.</Text>
             ) : (
@@ -175,8 +190,207 @@ function StatDetail({ stat, onBack }: { stat: 'plans' | 'friends' | 'hours'; onB
   );
 }
 
+// ─── Badge card ───────────────────────────────────────────────────────────────
+function BadgeCard({
+  badge, unlocked, onPress,
+}: {
+  badge: BadgeDef;
+  unlocked: boolean;
+  onPress: () => void;
+}) {
+  const isPlatinum = badge.tier === 'platinum';
+  const tierC = TIER_COLORS[badge.tier];
+  const cardH = isPlatinum ? CARD_W + 10 : CARD_W;
+
+  return (
+    <TouchableOpacity
+      style={[
+        bst.card,
+        { width: CARD_W, height: cardH },
+        unlocked
+          ? { backgroundColor: tierC.bg, borderColor: tierC.bg }
+          : { backgroundColor: LOCKED_BG, borderColor: '#3A3A3A' },
+        isPlatinum && unlocked && Shadows.sm,
+      ]}
+      onPress={onPress}
+      activeOpacity={0.82}
+    >
+      <View style={bst.emojiWrap}>
+        <Text style={[bst.emoji, !unlocked && { opacity: 0.2 }]}>{badge.emoji}</Text>
+        {!unlocked && (
+          <View style={bst.lockOverlay}>
+            <Ionicons name="lock-closed" size={12} color="rgba(255,255,255,0.6)" />
+          </View>
+        )}
+      </View>
+      <Text
+        style={[bst.label, { color: unlocked ? tierC.text : 'rgba(255,255,255,0.35)' }]}
+        numberOfLines={2}
+      >
+        {badge.name}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+// ─── Badge detail modal ────────────────────────────────────────────────────────
+function BadgeModal({
+  badge, unlocked, unlockedAt, onClose,
+}: {
+  badge: BadgeDef | null;
+  unlocked: boolean;
+  unlockedAt: string | null;
+  onClose: () => void;
+}) {
+  if (!badge) return null;
+  const tierC = TIER_COLORS[badge.tier];
+
+  const formatDate = (iso: string) => {
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  };
+
+  return (
+    <Modal visible={!!badge} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={bst.modalOverlay}>
+        <TouchableWithoutFeedback onPress={onClose}>
+          <View style={StyleSheet.absoluteFill} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <TouchableWithoutFeedback onPress={() => {}}>
+          <View style={[bst.modalCard, { borderColor: unlocked ? tierC.bg : '#3A3A3A' }]}>
+            {/* Tier pill */}
+            <View style={[bst.modalTierPill, { backgroundColor: unlocked ? tierC.bg : LOCKED_BG }]}>
+              <Text style={[bst.modalTierText, { color: unlocked ? tierC.text : 'rgba(255,255,255,0.5)' }]}>
+                {TIER_LABELS[badge.tier].toUpperCase()}
+              </Text>
+            </View>
+
+            {/* Emoji */}
+            <Text style={[bst.modalEmoji, !unlocked && { opacity: 0.25 }]}>{badge.emoji}</Text>
+
+            {/* Name */}
+            <Text style={bst.modalName}>{badge.name}</Text>
+
+            {/* Desc / condition */}
+            <Text style={bst.modalDesc}>{badge.desc}</Text>
+
+            {/* Status */}
+            {unlocked ? (
+              <View style={[bst.modalStatusRow, { backgroundColor: tierC.bg }]}>
+                <Text style={[bst.modalStatusText, { color: tierC.text }]}>
+                  Unlocked {unlockedAt ? formatDate(unlockedAt) : ''}
+                </Text>
+              </View>
+            ) : (
+              <View style={bst.modalLockedRow}>
+                <Ionicons name="lock-closed" size={14} color="rgba(255,255,255,0.5)" />
+                <Text style={bst.modalLockedText}>{badge.condition}</Text>
+              </View>
+            )}
+
+            <TouchableOpacity style={bst.modalCloseBtn} onPress={onClose} activeOpacity={0.85}>
+              <Text style={bst.modalCloseBtnText}>CLOSE</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableWithoutFeedback>
+      </View>
+    </Modal>
+  );
+}
+
+// ─── Trophy section ────────────────────────────────────────────────────────────
+function TrophySection({
+  unlockedMap, dark, textPrimary, textMuted, surface, onModalChange, trophyRef,
+}: {
+  unlockedMap: Map<string, string>;
+  dark: boolean;
+  textPrimary: string;
+  textMuted: string;
+  surface: string;
+  onModalChange?: (open: boolean) => void;
+  trophyRef?: React.RefObject<View>;
+}) {
+  const [filter, setFilter] = useState<'ALL' | BadgeTier>('ALL');
+  const [modalBadge, setModalBadge] = useState<BadgeDef | null>(null);
+
+  const filtered = ALL_BADGES
+    .filter(b => filter === 'ALL' || b.tier === filter)
+    .sort((a, b) => TIER_ORDER[a.tier] - TIER_ORDER[b.tier]);
+  const unlockedCount = ALL_BADGES.filter(b => unlockedMap.has(b.id)).length;
+
+  return (
+    <View ref={trophyRef} collapsable={false}>
+      {/* Section header */}
+      <View style={tst.headerRow}>
+        <Text style={[styles.sectionHeader, { color: textPrimary, marginBottom: 0 }]}>TROPHIES</Text>
+        <Text style={[tst.count, { color: textMuted }]}>{unlockedCount} / {ALL_BADGES.length}</Text>
+      </View>
+
+      {/* Filter pills */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={tst.pillScroll}
+        contentContainerStyle={tst.pillRow}
+      >
+        {FILTER_OPTIONS.map(opt => {
+          const active = filter === opt;
+          const pillBg = active
+            ? (opt === 'ALL' ? '#001845' : TIER_COLORS[opt as BadgeTier].bg)
+            : (dark ? '#1A2F50' : '#E0E2E8');
+          const pillText = active
+            ? (opt === 'ALL' ? '#FFFFFF' : TIER_COLORS[opt as BadgeTier].text)
+            : textMuted;
+          return (
+            <TouchableOpacity
+              key={opt}
+              style={[tst.pill, { backgroundColor: pillBg, borderColor: active ? pillBg : (dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)') }]}
+              onPress={() => setFilter(opt)}
+              activeOpacity={0.8}
+            >
+              <Text style={[tst.pillText, { color: pillText }]}>
+                {opt === 'ALL' ? 'ALL' : TIER_LABELS[opt as BadgeTier].toUpperCase()}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      {/* Grid */}
+      <View style={tst.grid}>
+        {filtered.map(badge => (
+          <BadgeCard
+            key={badge.id}
+            badge={badge}
+            unlocked={unlockedMap.has(badge.id)}
+            onPress={() => { setModalBadge(badge); onModalChange?.(true); }}
+          />
+        ))}
+      </View>
+
+      {/* Modal */}
+      <BadgeModal
+        badge={modalBadge}
+        unlocked={modalBadge ? unlockedMap.has(modalBadge.id) : false}
+        unlockedAt={modalBadge ? (unlockedMap.get(modalBadge.id) ?? null) : null}
+        onClose={() => { setModalBadge(null); onModalChange?.(false); }}
+      />
+    </View>
+  );
+}
+
 // ─── Profile screen ───────────────────────────────────────────────────────────
-export default function ProfileScreen() {
+export interface ProfileTourRefs {
+  trophies: React.RefObject<View>;
+}
+
+export default function ProfileScreen({
+  onModalChange, profileTourRefs, onRedoTour,
+}: {
+  onModalChange?: (open: boolean) => void;
+  profileTourRefs?: ProfileTourRefs;
+  onRedoTour?: () => void;
+}) {
   const [dark, setDarkMode] = useState(isDark());
   useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
 
@@ -190,15 +404,11 @@ export default function ProfileScreen() {
   const [degree, setDegree] = useState(profile?.degree          ?? '');
   const [year,   setYear]   = useState(profile?.year_of_study   ?? '');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(profile?.avatar_url ?? null);
-  const [planCount,   setPlanCount]   = useState(12);
-  const [friendCount, setFriendCount] = useState(24);
   const [editing, setEditing] = useState(false);
   const [saving,  setSaving]  = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const profileInitialized = useRef(false);
 
-  const [badges, setBadges] = useState<Badge[]>([]);
-  const [earnedMap, setEarnedMap] = useState<Record<string, boolean>>({});
 
   // Only sync from profile on first load — never let a background re-fetch overwrite local edits
   useEffect(() => {
@@ -210,25 +420,24 @@ export default function ProfileScreen() {
     setAvatarUrl(profile.avatar_url ?? null);
   }, [profile]);
 
+
+  const [unlockedMap, setUnlockedMap] = useState<Map<string, string>>(new Map());
+
   useEffect(() => {
     if (!user) return;
-    getPlanCount(user.id).then(setPlanCount).catch(() => {});
-    getFriendCount(user.id).then(setFriendCount).catch(() => {});
-
-    // Load badges and which ones the user has earned
-    (async () => {
-      try {
-        const all = await getAllBadges();
-        const userBadges = await getUserBadges(user.id);
-        setBadges(all);
-        const map: Record<string, boolean> = {};
-        userBadges.forEach(ub => { if (ub.badge && ub.badge.id) map[ub.badge.id] = true; });
-        setEarnedMap(map);
-      } catch {
-        // ignore — badges will remain empty
-      }
-    })();
+    getUserBadges(user.id).then(list =>
+      setUnlockedMap(new Map(list.map(b => [b.badgeId, b.unlockedAt])))
+    ).catch(() => {});
   }, [user?.id]);
+
+  // Keep the trophy grid in sync when badges are unlocked from any screen
+  useEffect(() => onBadgeUnlocked(badge => {
+    setUnlockedMap(prev => {
+      const next = new Map(prev);
+      next.set(badge.id, new Date().toISOString());
+      return next;
+    });
+  }), []);
 
   const [notifOn,    setNotifOn]    = useState(true);
   const [pushOn,     setPushOn]     = useState(true);
@@ -240,13 +449,54 @@ export default function ProfileScreen() {
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // Debug panel (DEV only)
+  const [debugExpanded, setDebugExpanded] = useState(false);
+  const [debugRefreshing, setDebugRefreshing] = useState(false);
+  const [debugSessionToken, setDebugSessionToken] = useState<string>('—');
+  const [debugFriendsCount, setDebugFriendsCount] = useState<number | null>(null);
+  const [debugPlansCount, setDebugPlansCount] = useState<number | null>(null);
+  const [debugMessagesCount, setDebugMessagesCount] = useState<number | null>(null);
+
+  async function loadDebugData() {
+    if (!user) return;
+    setDebugRefreshing(true);
+    try {
+      const [sessionResult, friends, plans, msgs] = await Promise.all([
+        supabase.auth.getSession(),
+        getFriendCount(user.id),
+        getPlanCount(user.id),
+        getMessagesCount(user.id),
+      ]);
+      const token = sessionResult.data.session?.access_token ?? '';
+      setDebugSessionToken(token ? token.slice(0, 20) + '…' : '(none)');
+      setDebugFriendsCount(friends);
+      setDebugPlansCount(plans);
+      setDebugMessagesCount(msgs);
+    } catch (err: any) {
+      console.error('debug panel loadDebugData error:', err);
+      showToast('Debug fetch failed');
+    } finally {
+      setDebugRefreshing(false);
+    }
+  }
+
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = useCallback(async () => {
+    if (!user) return;
+    setRefreshing(true);
+    try {
+      const list = await getUserBadges(user.id);
+      setUnlockedMap(new Map(list.map(b => [b.badgeId, b.unlockedAt])));
+    } catch { /* silent */ }
+    setRefreshing(false);
+  }, [user?.id]);
+
   const avatarInitials = profile?.avatar_initials
     ?? (name ? name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() : '?');
 
   // Theme-derived colours
   const bg           = dark ? DarkTheme.bg       : Colors.lightGrey;
-  const surface      = dark ? DarkTheme.surface  : '#ECEEF3';
-  const surfaceAlt   = dark ? DarkTheme.surfaceAlt : '#E8EAF0';
+  const surface      = dark ? DarkTheme.surface  : Colors.white;
   const textPrimary  = dark ? DarkTheme.text      : DARK;
   const textMuted    = dark ? DarkTheme.textMuted : Colors.gray500;
   const divider      = dark ? DarkTheme.border    : 'rgba(0,0,0,0.08)';
@@ -354,7 +604,18 @@ export default function ProfileScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bg }]} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={dark ? '#FFFFFF' : DARK}
+            colors={[DARK]}
+          />
+        }
+      >
 
         {/* ── Avatar + info ── */}
         <View style={styles.profileRow}>
@@ -416,7 +677,7 @@ export default function ProfileScreen() {
             activeOpacity={0.75}
           >
             {saving
-              ? <ActivityIndicator size="small" color={DARK} />
+              ? <ActivityIndicator size="small" color={Colors.navy} />
               : <Ionicons name={editing ? 'checkmark' : 'pencil'} size={18} color={textPrimary} />}
           </TouchableOpacity>
         </View>
@@ -431,22 +692,16 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* ── Badges ── */}
-        <Text style={[styles.sectionHeader, { color: textPrimary }]}>Badges</Text>
-        <View style={styles.badgeRow}>
-          {badges.map(badge => {
-            const earned = !!earnedMap[badge.id];
-            return (
-              <View key={badge.id} style={[styles.badgeTile, { backgroundColor: surfaceAlt, opacity: earned ? 1 : 0.38 }]}>
-                <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
-                <Text style={[styles.badgeLabel, { color: textPrimary }]}>{badge.label}</Text>
-                {earned && badge.description ? (
-                  <Text style={[styles.badgeDesc, { color: textMuted }]}>{badge.description}</Text>
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
+        {/* ── Trophies ── */}
+        <TrophySection
+          unlockedMap={unlockedMap}
+          dark={dark}
+          textPrimary={textPrimary}
+          textMuted={textMuted}
+          surface={surface}
+          onModalChange={onModalChange}
+          trophyRef={profileTourRefs?.trophies}
+        />
 
         {/* ── Settings ── */}
         <View style={styles.settingsHeaderRow}>
@@ -467,37 +722,102 @@ export default function ProfileScreen() {
           ))}
         </View>
 
+        {/* ── APP GUIDE ── */}
+        <TouchableOpacity
+          style={[styles.appGuideRow, { backgroundColor: surface }]}
+          onPress={onRedoTour}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.appGuideEmoji}>🧭</Text>
+          <Text style={[styles.appGuideLabel, { color: textPrimary }]}>App Guide</Text>
+          <Text style={[styles.appGuideArrow, { color: textMuted }]}>→</Text>
+        </TouchableOpacity>
+
         {/* ── Sign out ── */}
         <TouchableOpacity style={[styles.signOutBtn, { backgroundColor: surface }]} onPress={() => signOut()} activeOpacity={0.85}>
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.deleteBtn} onPress={() => setShowDeleteConfirm(true)}>
+        <TouchableOpacity style={styles.deleteBtn} onPress={() => { setShowDeleteConfirm(true); onModalChange?.(true); }}>
           <Text style={[styles.deleteBtnText, { color: textMuted }]}>Delete account</Text>
         </TouchableOpacity>
+
+        {/* ── DEBUG PANEL (DEV only) ── */}
+        {__DEV__ && (
+          <View style={[dst.container, { borderColor: debugExpanded ? '#FF3B30' : (dark ? '#3A3A3A' : '#CCCCCC') }]}>
+            <TouchableOpacity
+              style={dst.header}
+              onPress={() => { setDebugExpanded(v => !v); if (!debugExpanded) loadDebugData(); }}
+              activeOpacity={0.8}
+            >
+              <Text style={dst.headerText}>DEBUG</Text>
+              <Ionicons name={debugExpanded ? 'chevron-up' : 'chevron-down'} size={14} color="#FF3B30" />
+            </TouchableOpacity>
+
+            {debugExpanded && (
+              <View style={dst.body}>
+                <View style={dst.row}>
+                  <Text style={dst.label}>USER ID</Text>
+                  <Text style={dst.value} numberOfLines={1}>{user?.id ?? '—'}</Text>
+                </View>
+                <View style={[dst.row, dst.rowBorder]}>
+                  <Text style={dst.label}>SESSION TOKEN</Text>
+                  <Text style={dst.value}>{debugSessionToken}</Text>
+                </View>
+                <View style={[dst.row, dst.rowBorder]}>
+                  <Text style={dst.label}>FRIENDS (DB)</Text>
+                  <Text style={dst.value}>{debugFriendsCount ?? '…'}</Text>
+                </View>
+                <View style={[dst.row, dst.rowBorder]}>
+                  <Text style={dst.label}>PLANS (DB)</Text>
+                  <Text style={dst.value}>{debugPlansCount ?? '…'}</Text>
+                </View>
+                <View style={[dst.row, dst.rowBorder]}>
+                  <Text style={dst.label}>MESSAGES (DB)</Text>
+                  <Text style={dst.value}>{debugMessagesCount ?? '…'}</Text>
+                </View>
+                <TouchableOpacity
+                  style={dst.refreshBtn}
+                  onPress={loadDebugData}
+                  disabled={debugRefreshing}
+                  activeOpacity={0.8}
+                >
+                  {debugRefreshing
+                    ? <ActivityIndicator size="small" color="#000" />
+                    : <Text style={dst.refreshBtnText}>REFRESH ALL DATA</Text>}
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={{ height: 24 }} />
       </ScrollView>
 
       {/* Delete confirmation modal */}
-      <Modal visible={showDeleteConfirm} transparent animationType="fade" onRequestClose={() => setShowDeleteConfirm(false)}>
+      <Modal visible={showDeleteConfirm} transparent animationType="fade" onRequestClose={() => { setShowDeleteConfirm(false); onModalChange?.(false); }}>
         <View style={styles.deleteOverlay}>
-          <View style={[styles.deleteSheet, { backgroundColor: dark ? DarkTheme.surface : '#FFFFFF' }]}>
-            <Text style={styles.deleteSheetTitle}>Delete account?</Text>
-            <Text style={[styles.deleteSheetBody, { color: textMuted }]}>
-              This will permanently remove your profile, plans, and friend connections. This cannot be undone.
-            </Text>
-            <TouchableOpacity
-              style={styles.deleteConfirmBtn}
-              onPress={() => { setShowDeleteConfirm(false); showToast('Account deletion requested'); }}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.deleteConfirmText}>Yes, delete my account</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.deleteCancelBtn, { backgroundColor: surface }]} onPress={() => setShowDeleteConfirm(false)} activeOpacity={0.85}>
-              <Text style={[styles.deleteCancelText, { color: textPrimary }]}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableWithoutFeedback onPress={() => { setShowDeleteConfirm(false); onModalChange?.(false); }}>
+            <View style={StyleSheet.absoluteFill} pointerEvents="box-only" />
+          </TouchableWithoutFeedback>
+          <TouchableWithoutFeedback onPress={() => {}}>
+            <View style={[styles.deleteSheet, { backgroundColor: dark ? DarkTheme.surface : '#FFFFFF' }]}>
+              <Text style={styles.deleteSheetTitle}>Delete account?</Text>
+              <Text style={[styles.deleteSheetBody, { color: textMuted }]}>
+                This will permanently remove your profile, plans, and friend connections. This cannot be undone.
+              </Text>
+              <TouchableOpacity
+                style={styles.deleteConfirmBtn}
+                onPress={() => { setShowDeleteConfirm(false); onModalChange?.(false); showToast('Account deletion requested'); }}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.deleteConfirmText}>Yes, delete my account</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.deleteCancelBtn, { backgroundColor: surface }]} onPress={() => { setShowDeleteConfirm(false); onModalChange?.(false); }} activeOpacity={0.85}>
+                <Text style={[styles.deleteCancelText, { color: textPrimary }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableWithoutFeedback>
         </View>
       </Modal>
     </SafeAreaView>
@@ -674,7 +994,7 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.gray300,
     justifyContent: 'center',
   },
-  trackOn: { backgroundColor: DARK },
+  trackOn: { backgroundColor: Colors.navy },
   pill: {
     width: 22,
     height: 22,
@@ -685,6 +1005,27 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.18,
     shadowRadius: 2,
     elevation: 2,
+  },
+
+  // App guide row
+  appGuideRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    marginBottom: 10,
+    gap: 12,
+  },
+  appGuideEmoji: { fontSize: 18 },
+  appGuideLabel: {
+    flex: 1,
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.bold,
+  },
+  appGuideArrow: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.bold,
   },
 
   // Sign out / delete
@@ -825,7 +1166,7 @@ const styles = StyleSheet.create({
   friendDetailInitials: { fontSize: 13, fontWeight: Typography.weights.black },
   friendDetailName: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, marginBottom: 5 },
   friendBar: { height: 7, borderRadius: 4, overflow: 'hidden' },
-  friendBarFill: { height: '100%', backgroundColor: DARK, borderRadius: 4 },
+  friendBarFill: { height: '100%', backgroundColor: Colors.navy, borderRadius: 4 },
   friendDetailCount: { fontSize: 13, fontWeight: Typography.weights.black, width: 28, textAlign: 'right' },
 
   hoursTotal: {
@@ -853,4 +1194,223 @@ const styles = StyleSheet.create({
   hoursBarTrack: { flex: 1, height: 7, borderRadius: 4, overflow: 'hidden' },
   hoursBarFill: { height: '100%', backgroundColor: Colors.blueLight, borderRadius: 4 },
   hoursHrs: { fontSize: 12, fontWeight: Typography.weights.black, width: 28, textAlign: 'right' },
+});
+
+// ─── Badge card styles ────────────────────────────────────────────────────────
+const bst = StyleSheet.create({
+  card: {
+    borderRadius: 10,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    paddingVertical: 8,
+    gap: 4,
+    marginBottom: GRID_GAP,
+  },
+  emojiWrap: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emoji: { fontSize: 26 },
+  lockOverlay: {
+    position: 'absolute',
+    bottom: -2,
+    right: -4,
+  },
+  label: {
+    fontSize: 9,
+    fontWeight: Typography.weights.black,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+    lineHeight: 12,
+  },
+
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: '#001845',
+    borderRadius: 20,
+    borderWidth: 3,
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    paddingVertical: 32,
+    gap: 10,
+    ...Shadows.lg,
+  },
+  modalTierPill: {
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 5,
+  },
+  modalTierText: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2.5,
+  },
+  modalEmoji: { fontSize: 72, marginVertical: 6 },
+  modalName: {
+    fontSize: Typography.sizes.xl,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+    textAlign: 'center',
+    letterSpacing: -0.5,
+  },
+  modalDesc: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.medium,
+    color: 'rgba(255,255,255,0.65)',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  modalStatusRow: {
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginTop: 4,
+  },
+  modalStatusText: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 0.5,
+  },
+  modalLockedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
+  modalLockedText: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.medium,
+    color: 'rgba(255,255,255,0.5)',
+    textAlign: 'center',
+    flex: 1,
+    flexWrap: 'wrap',
+  },
+  modalCloseBtn: {
+    marginTop: 8,
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  modalCloseBtnText: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.65)',
+    letterSpacing: 2,
+  },
+});
+
+// ─── Debug panel styles ───────────────────────────────────────────────────────
+const dst = StyleSheet.create({
+  container: {
+    borderWidth: 2,
+    borderRadius: 0,
+    marginBottom: 16,
+    overflow: 'hidden',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: '#000000',
+  },
+  headerText: {
+    fontSize: 11,
+    fontWeight: '900' as any,
+    color: '#FF3B30',
+    letterSpacing: 3,
+  },
+  body: {
+    backgroundColor: '#0A0A0A',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+  rowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: '#1F1F1F',
+  },
+  label: {
+    fontSize: 9,
+    fontWeight: '900' as any,
+    color: '#666666',
+    letterSpacing: 1.5,
+    flex: 1,
+  },
+  value: {
+    fontSize: 11,
+    fontWeight: '700' as any,
+    color: '#00FF41',
+    fontVariant: ['tabular-nums'],
+    maxWidth: '60%',
+    textAlign: 'right',
+  },
+  refreshBtn: {
+    marginTop: 10,
+    marginBottom: 4,
+    borderWidth: 2,
+    borderColor: '#FF3B30',
+    borderRadius: 0,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 40,
+  },
+  refreshBtnText: {
+    fontSize: 11,
+    fontWeight: '900' as any,
+    color: '#FF3B30',
+    letterSpacing: 2,
+  },
+});
+
+// ─── Trophy section styles ────────────────────────────────────────────────────
+const tst = StyleSheet.create({
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  count: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.bold,
+  },
+  pillScroll: { marginBottom: 14 },
+  pillRow: { flexDirection: 'row', gap: 8, paddingRight: 4 },
+  pill: {
+    borderRadius: 20,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  pillText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: GRID_GAP,
+    marginBottom: 36,
+  },
 });

@@ -27,8 +27,10 @@ export interface Plan {
   id: string;
   creator_id: string;
   title: string;
+  custom_title?: string | null;
   location: string;
   time: string; // ISO timestamptz
+  status?: string;
   visibility: 'public' | 'friends' | 'invite';
   weather_snapshot?: { emoji: string; temp: number; condition: string } | null;
   created_at: string;
@@ -126,4 +128,14 @@ export interface PlanForDisplay {
   attendeeInitials: string[];
   spots: number;
   isOwn: boolean;
+}
+
+export interface PendingInviteDisplay {
+  inviteId: string;
+  planId: string;
+  title: string;
+  location: string;
+  time: string;
+  weather: { emoji: string; temp: number; condition: string } | null;
+  creatorName: string;
 }

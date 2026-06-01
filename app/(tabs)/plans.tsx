@@ -1,25 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TouchableWithoutFeedback,
   Modal, TextInput, KeyboardAvoidingView, Platform, Dimensions,
-  ActivityIndicator, Animated,
+  ActivityIndicator, Animated, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
+import { Colors, Typography } from '../../constants/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
-import { getMyPlans, getPublicPlans, createPlan as createPlanInDB, joinPlan, leavePlan, formatPlanTime } from '../../services/plans';
-import { createChatGroup } from '../../services/messages';
-import type { Plan } from '../../types';
+import { getMyPlans, getPublicPlans, createPlan as createPlanInDB, joinPlan, leavePlan, formatPlanTime, getPendingInvites, subscribeToPlanInvites, acceptPlanInvite, declinePlanInvite, updatePlan, cancelPlan, inviteMoreToPlan } from '../../services/plans';
+import { sendSystemMessage, getGroupChatForPlan, leaveGroup } from '../../services/messages';
+import type { Plan, PendingInviteDisplay } from '../../types';
 import { useFriends } from '../../hooks/useFriends';
 import { bookmarkPlan, unbookmarkPlan } from '../../lib/suggestedStore';
+import { useWeather } from '../../hooks/useWeather';
 import { isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
+import { notifyPlanInviteCount } from '../../lib/planInviteStore';
+import { checkAndUnlockBadges } from '../../services/badges';
+import { notifyBadgeUnlocked } from '../../lib/badgeQueue';
+import { getPlanCount } from '../../services/users';
 
 const { width } = Dimensions.get('window');
 
-const DARK = '#001233';
-const CARD = '#001845';
 
 // ─── Hardcoded data ───────────────────────────────────────────────────────────
 const SUGGESTED_PLANS = [
@@ -120,10 +123,11 @@ const LOCATIONS_DATA = [
   { name: "Queen's Lawn", busyness: 0.25 },
   { name: 'Beit Quad',    busyness: 0.55 },
   { name: 'SAF Terrace',  busyness: 0.75 },
-  { name: 'JCR',          busyness: 0.40 },
-  { name: 'Library',      busyness: 0.88 },
+  { name: 'JCR',          busyness: 0.30 },
+  { name: 'Library',      busyness: 0.45 },
   { name: 'Hyde Park',    busyness: 0.20 },
-  { name: 'Union Bar',    busyness: 0.60 },
+  { name: 'Union Bar',    busyness: 0.65 },
+  { name: 'Dyson',        busyness: 0.25 },
   { name: 'Sherfield',    busyness: 0.45 },
 ];
 
@@ -139,6 +143,15 @@ const ACTIVITIES = [
 ];
 
 const ACT_BOX_W = Math.floor((width - 48 - 30) / 4);
+
+const DURATIONS = [
+  { label: '30 min', value: 30  },
+  { label: '1 hr',   value: 60  },
+  { label: '1.5 hr', value: 90  },
+  { label: '2 hr',   value: 120 },
+  { label: '3 hr',   value: 180 },
+  { label: '4+ hr',  value: 240 },
+];
 
 function busynessColor(v: number) {
   if (v < 0.3)  return '#4CAF50';
@@ -259,17 +272,6 @@ function FriendInviteGrid({
 
   return (
     <View>
-      <View style={styles.legendRow}>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendDot, { backgroundColor: Colors.bluePale, borderColor: Colors.black }]} />
-          <Text style={styles.legendText}>Online now</Text>
-        </View>
-        <View style={styles.legendItem}>
-          <View style={[styles.legendDot, { backgroundColor: Colors.gray100, borderColor: Colors.gray300 }]} />
-          <Text style={styles.legendText}>Offline</Text>
-        </View>
-      </View>
-
       <View style={styles.friendGrid}>
         {friends.map(friend => {
           const isSelected = selected.includes(friend.id);
@@ -281,7 +283,7 @@ function FriendInviteGrid({
               activeOpacity={0.75}
             >
               <View style={{ position: 'relative' }}>
-                <Avatar initials={friend.avatar_initials} size={42} selected={isSelected} free={friend.is_online} />
+                <Avatar initials={friend.avatar_initials} size={42} selected={isSelected} free={true} />
                 {isSelected && (
                   <View style={[styles.tickBadge, { top: -2, right: -2 }]}>
                     <Text style={styles.tickText}>✓</Text>
@@ -290,13 +292,12 @@ function FriendInviteGrid({
               </View>
               <Text style={[
                 styles.friendCellName,
-                !friend.is_online && styles.friendCellNameBusy,
                 isSelected && styles.friendCellNameSelected,
               ]}>
                 {friend.full_name.split(' ')[0]}
               </Text>
-              <Text style={[styles.friendCellStatus, { color: friend.is_online ? Colors.green : Colors.gray500 }]}>
-                {friend.is_online ? 'Online now' : 'Offline'}
+              <Text style={[styles.friendCellStatus, { color: Colors.green }]}>
+                Free
               </Text>
             </TouchableOpacity>
           );
@@ -344,71 +345,75 @@ function SuggestedDetailSheet({
   return (
     <Modal visible={visible} transparent animationType="none" onRequestClose={handleClose}>
       <View style={{ flex: 1 }}>
-        <TouchableOpacity style={styles.sheetBackdrop} onPress={handleClose} activeOpacity={1} />
-        <Animated.View style={[styles.detailSheet, { transform: [{ translateY: sheetY }] }]}>
-          {/* Drag handle */}
-          <View style={styles.sheetHandle} />
+        <TouchableWithoutFeedback onPress={handleClose}>
+          <View style={styles.sheetBackdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <TouchableWithoutFeedback onPress={() => {}}>
+          <Animated.View style={[styles.detailSheet, { transform: [{ translateY: sheetY }] }]}>
+            {/* Drag handle */}
+            <View style={styles.sheetHandle} />
 
-          {/* Header row */}
-          <View style={styles.sheetHeaderRow}>
-            <Text style={styles.sheetTitle}>{plan.title}</Text>
-            <TouchableOpacity onPress={handleClose} style={styles.sheetCloseBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-              <Ionicons name="close" size={18} color={Colors.navy} />
-            </TouchableOpacity>
-          </View>
+            {/* Header row */}
+            <View style={styles.sheetHeaderRow}>
+              <Text style={styles.sheetTitle}>{plan.title}</Text>
+              <TouchableOpacity onPress={handleClose} style={styles.sheetCloseBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <Ionicons name="close" size={18} color={Colors.navy} />
+              </TouchableOpacity>
+            </View>
 
-          {/* Details */}
-          <View style={styles.sheetDetailRow}>
-            <Ionicons name="location-outline" size={15} color={Colors.gray500} />
-            <Text style={styles.sheetDetailText}>{plan.location}</Text>
-          </View>
-          <View style={styles.sheetDetailRow}>
-            <Ionicons name="time-outline" size={15} color={Colors.gray500} />
-            <Text style={styles.sheetDetailText}>{plan.time}</Text>
-          </View>
-          <View style={styles.sheetDetailRow}>
-            <Ionicons name="partly-sunny-outline" size={15} color={Colors.gray500} />
-            <Text style={styles.sheetDetailText}>{plan.weather}</Text>
-          </View>
+            {/* Details */}
+            <View style={styles.sheetDetailRow}>
+              <Ionicons name="location-outline" size={15} color={Colors.gray500} />
+              <Text style={styles.sheetDetailText}>{plan.location}</Text>
+            </View>
+            <View style={styles.sheetDetailRow}>
+              <Ionicons name="time-outline" size={15} color={Colors.gray500} />
+              <Text style={styles.sheetDetailText}>{plan.time}</Text>
+            </View>
+            <View style={styles.sheetDetailRow}>
+              <Ionicons name="partly-sunny-outline" size={15} color={Colors.gray500} />
+              <Text style={styles.sheetDetailText}>{plan.weather}</Text>
+            </View>
 
-          <Text style={styles.sheetReason}>{plan.reason}</Text>
+            <Text style={styles.sheetReason}>{plan.reason}</Text>
 
-          {/* Suggested friends */}
-          <Text style={styles.sheetSectionLabel}>SUGGESTED FRIENDS</Text>
-          <View style={styles.sheetFriendRow}>
-            {plan.friends.map(f => (
-              <View key={f.initials} style={styles.sheetFriendItem}>
-                <View style={styles.sheetFriendCircle}>
-                  <Text style={styles.sheetFriendInitials}>{f.initials}</Text>
+            {/* Suggested friends */}
+            <Text style={styles.sheetSectionLabel}>SUGGESTED FRIENDS</Text>
+            <View style={styles.sheetFriendRow}>
+              {plan.friends.map(f => (
+                <View key={f.initials} style={styles.sheetFriendItem}>
+                  <View style={styles.sheetFriendCircle}>
+                    <Text style={styles.sheetFriendInitials}>{f.initials}</Text>
+                  </View>
+                  <Text style={styles.sheetFriendName}>{f.name.split(' ')[0]}</Text>
                 </View>
-                <Text style={styles.sheetFriendName}>{f.name.split(' ')[0]}</Text>
-              </View>
-            ))}
-          </View>
+              ))}
+            </View>
 
-          {/* Add to My Day button */}
-          <TouchableOpacity
-            style={[styles.addDayBtn, bookmarked && styles.addDayBtnActive]}
-            onPress={() => { onToggleBookmark(); handleClose(); }}
-            activeOpacity={0.85}
-          >
-            <Ionicons
-              name={bookmarked ? 'checkmark-circle' : 'add-circle-outline'}
-              size={18}
-              color={bookmarked ? '#FFFFFF' : DARK}
-            />
-            <Text style={[styles.addDayBtnText, bookmarked && styles.addDayBtnTextActive]}>
-              {bookmarked ? 'Added to Your Day' : 'Add to Your Day'}
-            </Text>
-          </TouchableOpacity>
-        </Animated.View>
+            {/* Add to My Day button */}
+            <TouchableOpacity
+              style={[styles.addDayBtn, bookmarked && styles.addDayBtnActive]}
+              onPress={() => { onToggleBookmark(); handleClose(); }}
+              activeOpacity={0.85}
+            >
+              <Ionicons
+                name={bookmarked ? 'checkmark-circle' : 'add-circle-outline'}
+                size={18}
+                color={bookmarked ? '#FFFFFF' : Colors.navy}
+              />
+              <Text style={[styles.addDayBtnText, bookmarked && styles.addDayBtnTextActive]}>
+                {bookmarked ? 'Added to Your Day' : 'Add to Your Day'}
+              </Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </TouchableWithoutFeedback>
       </View>
     </Modal>
   );
 }
 
 // ─── Suggested card ───────────────────────────────────────────────────────────
-function SuggestedCard({ plan }: { plan: typeof SUGGESTED_PLANS[0] }) {
+function SuggestedCard({ plan, onModalChange }: { plan: typeof SUGGESTED_PLANS[0]; onModalChange?: (open: boolean) => void }) {
   const [bookmarked, setBookmarked] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
 
@@ -428,7 +433,7 @@ function SuggestedCard({ plan }: { plan: typeof SUGGESTED_PLANS[0] }) {
       <View style={styles.suggestedWrap}>
         <TouchableOpacity
           style={styles.suggestedCard}
-          onPress={() => setDetailOpen(true)}
+          onPress={() => { setDetailOpen(true); onModalChange?.(true); }}
           activeOpacity={0.88}
         >
           <Text style={styles.suggestedTitle}>{plan.title}</Text>
@@ -453,7 +458,7 @@ function SuggestedCard({ plan }: { plan: typeof SUGGESTED_PLANS[0] }) {
       <SuggestedDetailSheet
         plan={plan}
         visible={detailOpen}
-        onClose={() => setDetailOpen(false)}
+        onClose={() => { setDetailOpen(false); onModalChange?.(false); }}
         bookmarked={bookmarked}
         onToggleBookmark={handleToggleBookmark}
       />
@@ -463,13 +468,14 @@ function SuggestedCard({ plan }: { plan: typeof SUGGESTED_PLANS[0] }) {
 
 // ─── Plan card ────────────────────────────────────────────────────────────────
 function PlanCard({
-  plan, currentUserId, onEdit,
+  plan, currentUserId, onEdit, onLeft, onJoined,
 }: {
   plan: typeof EXISTING_PLANS[0];
   currentUserId?: string;
   onEdit?: () => void;
+  onLeft?: (planId: string) => void;
+  onJoined?: (planId: string) => void;
 }) {
-  const [joined, setJoined] = useState(false);
   const [loadingJoin, setLoadingJoin] = useState(false);
   const isYours = plan.creator === 'You';
 
@@ -480,11 +486,10 @@ function PlanCard({
       if (currentUserId && (plan as any).dbId) {
         await joinPlan((plan as any).dbId, currentUserId);
       }
-      setJoined(true);
       showToast(`Joined "${plan.title}"! 🎉`);
+      onJoined?.((plan as any).dbId ?? plan.id);
     } catch {
-      showToast(`Joined "${plan.title}"! 🎉`);
-      setJoined(true);
+      showToast('Connection error — check your internet');
     } finally {
       setLoadingJoin(false);
     }
@@ -496,12 +501,16 @@ function PlanCard({
     try {
       if (currentUserId && (plan as any).dbId) {
         await leavePlan((plan as any).dbId, currentUserId);
+        try {
+          const groupId = await getGroupChatForPlan((plan as any).dbId);
+          if (groupId) await leaveGroup(groupId, currentUserId);
+        } catch { /* silent */ }
       }
       setJoined(false);
-      showToast(`Left "${plan.title}"`);
+      showToast('You left the plan');
+      onLeft?.((plan as any).dbId);
     } catch {
-      setJoined(false);
-      showToast(`Left "${plan.title}"`);
+      showToast('Connection error — check your internet');
     } finally {
       setLoadingJoin(false);
     }
@@ -533,19 +542,11 @@ function PlanCard({
         </View>
         <Text style={styles.spotsText}>{plan.spots} spots</Text>
         {!isYours ? (
-          joined ? (
-            <TouchableOpacity style={styles.joinedBtn} onPress={handleLeave} disabled={loadingJoin}>
-              {loadingJoin
-                ? <ActivityIndicator size="small" color="rgba(255,255,255,0.8)" />
-                : <Text style={styles.joinedBtnText}>✓ Joined</Text>}
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity style={styles.joinBtn} onPress={handleJoin} disabled={loadingJoin}>
-              {loadingJoin
-                ? <ActivityIndicator size="small" color={DARK} />
-                : <Text style={styles.joinBtnText}>Join</Text>}
-            </TouchableOpacity>
-          )
+          <TouchableOpacity style={styles.joinBtn} onPress={handleJoin} disabled={loadingJoin}>
+            {loadingJoin
+              ? <ActivityIndicator size="small" color={Colors.navy} />
+              : <Text style={styles.joinBtnText}>Join</Text>}
+          </TouchableOpacity>
         ) : (
           <View style={styles.yourPlanActions}>
             <Text style={styles.yourPlanText}>Your plan</Text>
@@ -561,23 +562,80 @@ function PlanCard({
   );
 }
 
+// ─── Duration slider ─────────────────────────────────────────────────────────
+// Implemented as discrete tap-targets so it works reliably inside a ScrollView
+// (PanResponder-based drag gets eaten by the scroll gesture recogniser).
+function DurationSlider({
+  value, onChange, dark, durBg, textCol, mutedCol,
+}: {
+  value: number; onChange: (v: number) => void;
+  dark: boolean; durBg: string; textCol: string; mutedCol: string;
+}) {
+  const idx = Math.max(0, DURATIONS.findIndex(d => d.value === value));
+
+  return (
+    <View style={[mst.durationWrap, { backgroundColor: durBg }]}>
+      <View style={mst.durationHeaderRow}>
+        <Text style={[mst.durationHeadLabel, { color: mutedCol }]}>DURATION</Text>
+        <Text style={[mst.durationValueLabel, { color: textCol }]}>{DURATIONS[idx].label}</Text>
+      </View>
+
+      {/* Step track */}
+      <View style={mst.durRow}>
+        {DURATIONS.map((d, i) => (
+          <React.Fragment key={d.value}>
+            {i > 0 && (
+              <View style={[
+                mst.durConnector,
+                i <= idx ? mst.durConnectorActive : dark && { backgroundColor: 'rgba(255,255,255,0.15)' },
+              ]} />
+            )}
+            <TouchableOpacity
+              onPress={() => onChange(d.value)}
+              hitSlop={{ top: 16, bottom: 16, left: 8, right: 8 }}
+              activeOpacity={0.7}
+            >
+              <View style={[
+                mst.durDot,
+                i < idx   && mst.durDotPast,
+                i === idx  && mst.durDotCurrent,
+                i > idx && dark && { borderColor: 'rgba(255,255,255,0.25)', backgroundColor: 'transparent' },
+              ]} />
+            </TouchableOpacity>
+          </React.Fragment>
+        ))}
+      </View>
+
+      {/* Labels */}
+      <View style={mst.durLabelRow}>
+        {DURATIONS.map(d => (
+          <Text key={d.value} style={[mst.durLabelText, { color: mutedCol }]}>{d.label}</Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 // ─── Create plan modal — 5-step wizard ───────────────────────────────────────
 const STEP_TITLES = ["Who's coming?", "See who's free", 'Where?', "What's the plan?", 'Review & send'];
 
 export function CreatePlanModal({
-  visible, onClose, onCreate, onCreated,
+  visible, onClose, onCreate, onCreated, initialValues,
 }: {
   visible: boolean;
   onClose: () => void;
   onCreate?: (plan: { id: string; title: string; location: string; time: string; weather: string }) => void;
   onCreated?: (plan: any) => void;
-  initialValues?: { title?: string; location?: string };
+  initialValues?: { title?: string; location?: string; slot?: string };
 }) {
   const { user } = useAuth();
   const { friends } = useFriends();
+  const { slotWeather, forecastLoading } = useWeather();
   const [step, setStep] = useState<1|2|3|4|5>(1);
   const [selectedFriends, setSelectedFriends] = useState<string[]>([]);
+  const [selectedDay, setSelectedDay] = useState<'today' | 'tomorrow' | 'week'>('today');
   const [selectedSlot, setSelectedSlot] = useState('');
+  const [selectedDuration, setSelectedDuration] = useState(60);
   const [selectedLocation, setSelectedLocation] = useState('');
   const [selectedActivity, setSelectedActivity] = useState('');
   const [createGroupChat, setCreateGroupChat] = useState(true);
@@ -585,11 +643,16 @@ export function CreatePlanModal({
 
   useEffect(() => {
     if (visible) {
-      setStep(1); setSelectedFriends([]); setSelectedSlot('');
-      setSelectedLocation(''); setSelectedActivity('');
+      const initSlot = initialValues?.slot ?? '';
+      setStep(1); setSelectedFriends([]);
+      setSelectedSlot(initSlot); setSelectedDuration(60);
+      setSelectedLocation(initialValues?.location ?? ''); setSelectedActivity('');
       setCreateGroupChat(true); setCreating(false);
+      if (initSlot.startsWith('tmr_')) setSelectedDay('tomorrow');
+      else if (['thu','fri','sat','sun'].includes(initSlot)) setSelectedDay('week');
+      else setSelectedDay('today');
     }
-  }, [visible]);
+  }, [visible, initialValues?.location, initialValues?.slot]);
 
   const toggleFriend = (id: string) =>
     setSelectedFriends(prev => prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]);
@@ -605,8 +668,11 @@ export function CreatePlanModal({
     const savedFriends = [...selectedFriends];
     const slotISO = slotToISO(selectedSlot || 'afternoon');
     const slotLabel = selectedSlot ? slotDisplayLabel(selectedSlot) : 'Afternoon  ·  1:00 – 3:00pm';
-    const weatherSlot = TIME_PERIODS.flatMap(p => p.slots).find(s => s.id === selectedSlot);
-    const weatherStr = weatherSlot ? `${weatherSlot.weather} ${weatherSlot.temp}°C` : '⛅ 18°C';
+    const fallbackSlot = TIME_PERIODS.flatMap(p => p.slots).find(s => s.id === selectedSlot);
+    const wx = slotWeather(selectedSlot || 'afternoon');
+    const weatherEmoji = wx ? wx.emoji : (fallbackSlot?.weather ?? '⛅');
+    const weatherTemp  = wx ? wx.temp  : (fallbackSlot?.temp  ?? 18);
+    const weatherStr   = `${weatherEmoji} ${weatherTemp}°C`;
 
     const localPlan = { id: `u_${Date.now()}`, title: autoTitle, location: selectedLocation, time: slotLabel, weather: weatherStr };
     onClose();
@@ -616,16 +682,16 @@ export function CreatePlanModal({
     if (user) {
       setCreating(true);
       try {
-        const dbPlan = await createPlanInDB(
+        const groupEndTime = new Date(new Date(slotISO).getTime() + selectedDuration * 60 * 1000).toISOString();
+        const { plan: dbPlan } = await createPlanInDB(
           {
             creator_id: user.id,
             title: autoTitle,
             location: selectedLocation,
             time: slotISO,
             visibility: 'friends',
-            weather_snapshot: weatherSlot
-              ? { emoji: weatherSlot.weather, temp: weatherSlot.temp, condition: 'Forecast' }
-              : { emoji: '⛅', temp: 18, condition: 'Partly Cloudy' },
+            weather_snapshot: { emoji: weatherEmoji, temp: weatherTemp, condition: 'Forecast' },
+            groupEndTime,
           },
           savedFriends
         );
@@ -633,9 +699,6 @@ export function CreatePlanModal({
           ...localPlan, id: dbPlan.id, dbId: dbPlan.id, rawTime: slotISO,
           creator: 'You', visibility: 'FRIENDS', attendees: [], spots: 5,
         });
-        if (createGroupChat && savedFriends.length > 0) {
-          createChatGroup(autoTitle, user.id, savedFriends).catch(() => {});
-        }
       } catch { /* optimistic already applied */ } finally { setCreating(false); }
     }
   };
@@ -643,28 +706,44 @@ export function CreatePlanModal({
   const goBack  = () => setStep(s => (s - 1) as any);
   const goNext  = () => setStep(s => (s + 1) as any);
 
+  // Dark mode
+  const [dark, setDarkMode] = useState(isDark());
+  useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
+  const sheetBg     = dark ? '#0C1829' : Colors.white;
+  const cardBg      = dark ? '#162640' : Colors.white;
+  const cardBorder  = dark ? 'rgba(255,255,255,0.15)' : Colors.gray300;
+  const textCol     = dark ? '#FFFFFF' : Colors.navy;
+  const mutedCol    = dark ? 'rgba(255,255,255,0.5)' : Colors.gray500;
+  const durBg       = dark ? '#1C3050' : Colors.gray100;
+  const summaryBg   = dark ? '#1A2F50' : Colors.bluePale;
+  const summaryBord = dark ? 'rgba(255,255,255,0.12)' : Colors.black;
+  const dividerCol  = dark ? 'rgba(255,255,255,0.08)' : Colors.gray100;
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={mst.overlay}>
-        <TouchableOpacity style={mst.backdrop} onPress={onClose} activeOpacity={1} />
-        <View style={mst.sheet}>
-          <View style={mst.handle} />
+        <TouchableWithoutFeedback onPress={onClose}>
+          <View style={mst.backdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <TouchableWithoutFeedback onPress={() => {}}>
+        <View style={[mst.sheet, { backgroundColor: sheetBg }]}>
+          <View style={[mst.handle, dark && { backgroundColor: 'rgba(255,255,255,0.18)' }]} />
 
           {/* Step dots */}
           <View style={mst.stepRow}>
             {([1,2,3,4,5] as const).map((s, i) => (
               <React.Fragment key={s}>
-                <View style={[mst.dot, step >= s && mst.dotActive, step === s && mst.dotCurrent]} />
-                {i < 4 && <View style={[mst.dotLine, step > s && mst.dotLineActive]} />}
+                <View style={[mst.dot, step >= s && mst.dotActive, step === s && mst.dotCurrent, dark && step < s && { borderColor: 'rgba(255,255,255,0.2)', backgroundColor: 'transparent' }]} />
+                {i < 4 && <View style={[mst.dotLine, step > s && mst.dotLineActive, dark && step <= s && { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
               </React.Fragment>
             ))}
           </View>
 
           {/* Title */}
           <View style={mst.header}>
-            <Text style={mst.title}>{STEP_TITLES[step - 1]}</Text>
-            <TouchableOpacity onPress={onClose} style={mst.closeBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-              <Ionicons name="close" size={18} color={Colors.navy} />
+            <Text style={[mst.title, { color: textCol }]}>{STEP_TITLES[step - 1]}</Text>
+            <TouchableOpacity onPress={onClose} style={[mst.closeBtn, { backgroundColor: dark ? 'rgba(255,255,255,0.1)' : Colors.gray100 }]} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="close" size={18} color={textCol} />
             </TouchableOpacity>
           </View>
 
@@ -674,62 +753,105 @@ export function CreatePlanModal({
             {/* ── Step 1: Friends ── */}
             {step === 1 && (
               <>
-                <Text style={mst.hint}>Tap to add them to the plan. You can skip this step.</Text>
+                <Text style={[mst.hint, { color: mutedCol }]}>Tap to add them to the plan. You can skip this step.</Text>
                 <FriendInviteGrid selected={selectedFriends} onToggle={toggleFriend} />
               </>
             )}
 
             {/* ── Step 2: When ── */}
-            {step === 2 && TIME_PERIODS.map(period => (
-              <View key={period.day} style={mst.periodSection}>
-                <Text style={mst.periodLabel}>{period.label}</Text>
-                {period.slots.map(slot => {
-                  const sel = selectedSlot === slot.id;
-                  const isNow = slot.id === 'now';
-                  const onlineFriends = selectedFriendObjs.filter(f => f.is_online);
-                  return (
-                    <TouchableOpacity key={slot.id} style={[mst.slotCard, sel && mst.slotCardSel]} onPress={() => setSelectedSlot(slot.id)} activeOpacity={0.85}>
-                      <View style={mst.slotTop}>
-                        <View>
-                          <Text style={[mst.slotLabel, sel && mst.slotLabelSel]}>{slot.label}</Text>
-                          <Text style={[mst.slotSub,   sel && mst.slotSubSel]}>{slot.sub}</Text>
-                        </View>
-                        <View style={mst.slotWeatherWrap}>
-                          <Text style={mst.slotEmoji}>{slot.weather}</Text>
-                          <Text style={[mst.slotTemp, sel && mst.slotTempSel]}>{slot.temp}°C</Text>
-                        </View>
-                      </View>
-                      {selectedFriendObjs.length > 0 && (
-                        <View style={mst.slotFriends}>
-                          {selectedFriendObjs.slice(0, 5).map(f => (
-                            <View key={f.id} style={[mst.slotAvatar, { opacity: isNow && !f.is_online ? 0.45 : 1 }]}>
-                              <Text style={mst.slotAvatarTxt}>{f.avatar_initials || f.full_name.slice(0,2).toUpperCase()}</Text>
-                              {isNow && f.is_online && <View style={mst.slotGreenDot} />}
-                            </View>
-                          ))}
-                          <Text style={[mst.slotCount, sel && { color: 'rgba(255,255,255,0.75)' }]}>
-                            {isNow ? `${onlineFriends.length} free now` : `${selectedFriendObjs.length} might join`}
+            {step === 2 && (() => {
+              const activePeriod = TIME_PERIODS.find(p => p.day === selectedDay)!;
+              const onlineFriends = selectedFriendObjs;
+              return (
+                <>
+                  {/* Day toggle */}
+                  <View style={mst.dayToggleRow}>
+                    {TIME_PERIODS.map(p => {
+                      const active = selectedDay === p.day;
+                      return (
+                        <TouchableOpacity
+                          key={p.day}
+                          style={[mst.dayBtn, active && mst.dayBtnActive, !active && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                          onPress={() => { setSelectedDay(p.day as any); setSelectedSlot(''); }}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={[mst.dayBtnText, active && mst.dayBtnTextActive, !active && { color: mutedCol }]}>
+                            {p.label}
                           </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Slots for selected day */}
+                  {activePeriod.slots.map(slot => {
+                    const sel = selectedSlot === slot.id;
+                    const isNow = slot.id === 'now';
+                    const wx = slotWeather(slot.id);
+                    const emoji = wx ? wx.emoji : slot.weather;
+                    const temp  = wx ? wx.temp  : slot.temp;
+                    return (
+                      <TouchableOpacity
+                        key={slot.id}
+                        style={[mst.slotCard, sel && mst.slotCardSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                        onPress={() => setSelectedSlot(slot.id)}
+                        activeOpacity={0.85}
+                      >
+                        <View style={mst.slotTop}>
+                          <View>
+                            <Text style={[mst.slotLabel, sel ? mst.slotLabelSel : { color: textCol }]}>{slot.label}</Text>
+                            <Text style={[mst.slotSub,   sel ? mst.slotSubSel  : { color: mutedCol }]}>{slot.sub}</Text>
+                          </View>
+                          <View style={mst.slotWeatherWrap}>
+                            {forecastLoading
+                              ? <ActivityIndicator size="small" color={sel ? 'rgba(255,255,255,0.6)' : mutedCol} />
+                              : <Text style={mst.slotEmoji}>{emoji}</Text>
+                            }
+                            <Text style={[mst.slotTemp, sel ? mst.slotTempSel : { color: textCol }]}>{forecastLoading ? '—' : `${temp}°C`}</Text>
+                          </View>
                         </View>
-                      )}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            ))}
+                        {selectedFriendObjs.length > 0 && (
+                          <View style={mst.slotFriends}>
+                            {selectedFriendObjs.slice(0, 5).map(f => (
+                              <View key={f.id} style={mst.slotAvatar}>
+                                <Text style={mst.slotAvatarTxt}>{f.avatar_initials || f.full_name.slice(0,2).toUpperCase()}</Text>
+                                {isNow && <View style={mst.slotGreenDot} />}
+                              </View>
+                            ))}
+                            <Text style={[mst.slotCount, sel ? { color: 'rgba(255,255,255,0.75)' } : { color: mutedCol }]}>
+                              {isNow ? `${onlineFriends.length} free now` : `${selectedFriendObjs.length} might join`}
+                            </Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* Duration — shown after a slot is picked */}
+                  {selectedSlot && (
+                    <DurationSlider value={selectedDuration} onChange={setSelectedDuration} dark={dark} durBg={durBg} textCol={textCol} mutedCol={mutedCol} />
+                  )}
+                </>
+              );
+            })()}
 
             {/* ── Step 3: Location ── */}
             {step === 3 && LOCATIONS_DATA.map(loc => {
               const sel = selectedLocation === loc.name;
               return (
-                <TouchableOpacity key={loc.name} style={[mst.locCard, sel && mst.locCardSel]} onPress={() => setSelectedLocation(loc.name)} activeOpacity={0.85}>
+                <TouchableOpacity
+                  key={loc.name}
+                  style={[mst.locCard, sel && mst.locCardSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                  onPress={() => setSelectedLocation(loc.name)}
+                  activeOpacity={0.85}
+                >
                   <View style={mst.locTop}>
-                    <Text style={[mst.locName, sel && mst.locNameSel]}>{loc.name}</Text>
+                    <Text style={[mst.locName, sel ? mst.locNameSel : { color: textCol }]}>{loc.name}</Text>
                     <Text style={[mst.locBusy, { color: sel ? 'rgba(255,255,255,0.85)' : busynessColor(loc.busyness) }]}>
                       {busynessLabel(loc.busyness)}
                     </Text>
                   </View>
-                  <View style={mst.barBg}>
+                  <View style={[mst.barBg, !sel && dark && { backgroundColor: 'rgba(255,255,255,0.1)' }]}>
                     <View style={[mst.barFill, {
                       width: `${Math.round(loc.busyness * 100)}%` as any,
                       backgroundColor: sel ? 'rgba(255,255,255,0.5)' : busynessColor(loc.busyness),
@@ -745,9 +867,14 @@ export function CreatePlanModal({
                 {ACTIVITIES.map(act => {
                   const sel = selectedActivity === act.label;
                   return (
-                    <TouchableOpacity key={act.id} style={[mst.actBox, sel && mst.actBoxSel]} onPress={() => setSelectedActivity(act.label)} activeOpacity={0.8}>
+                    <TouchableOpacity
+                      key={act.id}
+                      style={[mst.actBox, sel && mst.actBoxSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                      onPress={() => setSelectedActivity(act.label)}
+                      activeOpacity={0.8}
+                    >
                       <Text style={mst.actIcon}>{act.icon}</Text>
-                      <Text style={[mst.actLabel, sel && mst.actLabelSel]}>{act.label}</Text>
+                      <Text style={[mst.actLabel, sel ? mst.actLabelSel : { color: textCol }]}>{act.label}</Text>
                     </TouchableOpacity>
                   );
                 })}
@@ -757,43 +884,48 @@ export function CreatePlanModal({
             {/* ── Step 5: Summary ── */}
             {step === 5 && (
               <>
-                <View style={mst.summaryCard}>
+                <View style={[mst.summaryCard, { backgroundColor: summaryBg, borderColor: summaryBord }]}>
                   <View style={mst.summaryRow}>
-                    <Text style={mst.summaryKey}>WITH</Text>
+                    <Text style={[mst.summaryKey, { color: mutedCol }]}>WITH</Text>
                     <View style={mst.summaryAvatarRow}>
                       {selectedFriendObjs.length === 0
-                        ? <Text style={mst.summaryVal}>Just you</Text>
+                        ? <Text style={[mst.summaryVal, { color: textCol }]}>Just you</Text>
                         : selectedFriendObjs.slice(0, 6).map(f => (
                             <View key={f.id} style={mst.summaryAvatar}>
                               <Text style={mst.summaryAvatarTxt}>{f.avatar_initials || f.full_name.slice(0,2).toUpperCase()}</Text>
                             </View>
                           ))
                       }
-                      {selectedFriendObjs.length > 6 && <Text style={mst.summaryVal}>+{selectedFriendObjs.length - 6}</Text>}
+                      {selectedFriendObjs.length > 6 && <Text style={[mst.summaryVal, { color: textCol }]}>+{selectedFriendObjs.length - 6}</Text>}
                     </View>
                   </View>
-                  <View style={mst.summaryDivider} />
+                  <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
-                    <Text style={mst.summaryKey}>WHEN</Text>
-                    <Text style={mst.summaryVal} numberOfLines={1}>{selectedSlot ? slotDisplayLabel(selectedSlot) : '—'}</Text>
+                    <Text style={[mst.summaryKey, { color: mutedCol }]}>WHEN</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]} numberOfLines={1}>{selectedSlot ? slotDisplayLabel(selectedSlot) : '—'}</Text>
                   </View>
-                  <View style={mst.summaryDivider} />
+                  <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
-                    <Text style={mst.summaryKey}>WHERE</Text>
-                    <Text style={mst.summaryVal}>{selectedLocation || '—'}</Text>
+                    <Text style={[mst.summaryKey, { color: mutedCol }]}>FOR</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]}>{DURATIONS.find(d => d.value === selectedDuration)?.label ?? '1 hr'}</Text>
                   </View>
-                  <View style={mst.summaryDivider} />
+                  <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
-                    <Text style={mst.summaryKey}>ACTIVITY</Text>
-                    <Text style={mst.summaryVal}>{selectedActivity || '—'}</Text>
+                    <Text style={[mst.summaryKey, { color: mutedCol }]}>WHERE</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]}>{selectedLocation || '—'}</Text>
+                  </View>
+                  <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
+                  <View style={mst.summaryRow}>
+                    <Text style={[mst.summaryKey, { color: mutedCol }]}>ACTIVITY</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]}>{selectedActivity || '—'}</Text>
                   </View>
                 </View>
 
                 {/* Group chat toggle */}
-                <TouchableOpacity style={mst.chatToggleRow} onPress={() => setCreateGroupChat(v => !v)} activeOpacity={0.85}>
+                <TouchableOpacity style={[mst.chatToggleRow, { backgroundColor: durBg }]} onPress={() => setCreateGroupChat(v => !v)} activeOpacity={0.85}>
                   <View style={mst.chatToggleLeft}>
-                    <Text style={mst.chatToggleTitle}>Create group chat</Text>
-                    <Text style={mst.chatToggleSub}>A disposable chat for this plan — everyone added automatically.</Text>
+                    <Text style={[mst.chatToggleTitle, { color: textCol }]}>Create group chat</Text>
+                    <Text style={[mst.chatToggleSub, { color: mutedCol }]}>A disposable chat for this plan — everyone added automatically.</Text>
                   </View>
                   <View style={[mst.toggle, createGroupChat && mst.toggleOn]}>
                     <View style={[mst.toggleThumb, createGroupChat && mst.toggleThumbOn]} />
@@ -806,9 +938,9 @@ export function CreatePlanModal({
           </ScrollView>
 
           {/* Footer */}
-          <View style={mst.footer}>
+          <View style={[mst.footer, dark && { borderTopColor: 'rgba(255,255,255,0.08)' }]}>
             {step > 1
-              ? <TouchableOpacity style={mst.backBtn} onPress={goBack} activeOpacity={0.85}><Text style={mst.backBtnTxt}>← BACK</Text></TouchableOpacity>
+              ? <TouchableOpacity style={[mst.backBtn, { borderColor: cardBorder }]} onPress={goBack} activeOpacity={0.85}><Text style={[mst.backBtnTxt, { color: textCol }]}>← BACK</Text></TouchableOpacity>
               : <View style={{ flex: 1 }} />
             }
             {step < 5
@@ -821,13 +953,324 @@ export function CreatePlanModal({
             }
           </View>
         </View>
+        </TouchableWithoutFeedback>
+      </View>
+    </Modal>
+  );
+}
+
+// ─── Invite card ─────────────────────────────────────────────────────────────
+function InviteCard({
+  invite,
+  userId,
+  onAccepted,
+  onDeclined,
+}: {
+  invite: PendingInviteDisplay;
+  userId: string;
+  onAccepted: (inviteId: string) => void;
+  onDeclined: (inviteId: string) => void;
+}) {
+  const [loadingAccept, setLoadingAccept] = useState(false);
+  const [loadingDecline, setLoadingDecline] = useState(false);
+
+  const handleAccept = async () => {
+    if (loadingAccept || loadingDecline) return;
+    setLoadingAccept(true);
+    try {
+      await acceptPlanInvite(invite.inviteId, invite.planId, userId);
+      onAccepted(invite.inviteId);
+    } catch {
+      setLoadingAccept(false);
+    }
+  };
+
+  const handleDecline = async () => {
+    if (loadingAccept || loadingDecline) return;
+    setLoadingDecline(true);
+    try {
+      await declinePlanInvite(invite.inviteId);
+      onDeclined(invite.inviteId);
+    } catch {
+      setLoadingDecline(false);
+    }
+  };
+
+  return (
+    <View style={styles.inviteCard}>
+      <Text style={styles.inviteTitle}>{invite.title}</Text>
+      <Text style={styles.inviteMeta}>{invite.location}  ·  {formatPlanTime(invite.time)}</Text>
+      {invite.weather && (
+        <Text style={styles.inviteWeather}>{invite.weather.emoji} {invite.weather.temp}°C</Text>
+      )}
+      <Text style={styles.inviteFrom}>From {invite.creatorName}</Text>
+      <View style={styles.inviteActions}>
+        <TouchableOpacity
+          style={[styles.inviteDeclineBtn, loadingDecline && { opacity: 0.6 }]}
+          onPress={handleDecline}
+          disabled={loadingAccept || loadingDecline}
+          activeOpacity={0.85}
+        >
+          {loadingDecline
+            ? <ActivityIndicator size="small" color="rgba(255,255,255,0.7)" />
+            : <Text style={styles.inviteDeclineBtnText}>Decline</Text>
+          }
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.inviteAcceptBtn, loadingAccept && { opacity: 0.6 }]}
+          onPress={handleAccept}
+          disabled={loadingAccept || loadingDecline}
+          activeOpacity={0.85}
+        >
+          {loadingAccept
+            ? <ActivityIndicator size="small" color={Colors.navy} />
+            : <Text style={styles.inviteAcceptBtnText}>Accept</Text>
+          }
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+// ─── Plan edit sheet ──────────────────────────────────────────────────────────
+function PlanEditSheet({
+  plan, visible, onClose, userId, onUpdated, onCancelled,
+}: {
+  plan: any;
+  visible: boolean;
+  onClose: () => void;
+  userId: string;
+  onUpdated: (planId: string, updates: { title?: string; location?: string; time?: string; rawTime?: string }) => void;
+  onCancelled: (planId: string) => void;
+}) {
+  const [customTitle, setCustomTitle] = useState('');
+  const [selectedLocation, setSelectedLocation] = useState('');
+  const [selectedDay, setSelectedDay] = useState<'today' | 'tomorrow' | 'week'>('today');
+  const [selectedSlot, setSelectedSlot] = useState('');
+  const [inviteIds, setInviteIds] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const sheetY = useRef(new Animated.Value(900)).current;
+
+  useEffect(() => {
+    if (visible && plan) {
+      setCustomTitle(plan.title || '');
+      setSelectedLocation(plan.location || '');
+      setSelectedDay('today');
+      setSelectedSlot('');
+      setInviteIds([]);
+      setSaving(false);
+      setCancelling(false);
+      setConfirmCancel(false);
+      sheetY.setValue(900);
+      Animated.spring(sheetY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 200 }).start();
+    }
+  }, [visible, plan?.dbId]);
+
+  const handleClose = () => {
+    Animated.spring(sheetY, { toValue: 900, useNativeDriver: true, damping: 22, stiffness: 200 }).start(() => onClose());
+  };
+
+  const handleSave = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const updates: any = {};
+      const trimmedTitle = customTitle.trim();
+      if (trimmedTitle && trimmedTitle !== plan.title) updates.title = trimmedTitle;
+      if (selectedLocation && selectedLocation !== plan.location) updates.location = selectedLocation;
+      const slotISO = selectedSlot ? slotToISO(selectedSlot) : null;
+      if (slotISO) updates.time = slotISO;
+
+      if (Object.keys(updates).length > 0) {
+        await updatePlan(plan.dbId, updates);
+        try {
+          const groupId = await getGroupChatForPlan(plan.dbId);
+          if (groupId) {
+            const parts: string[] = [];
+            if (updates.title) parts.push(`renamed to "${updates.title}"`);
+            if (updates.location) parts.push(`moved to ${updates.location}`);
+            if (updates.time) parts.push(`rescheduled to ${formatPlanTime(updates.time)}`);
+            if (parts.length) await sendSystemMessage(groupId, userId, `📢 Plan ${parts.join(', ')}.`);
+          }
+        } catch { /* silent */ }
+        onUpdated(plan.dbId, {
+          ...(updates.title ? { title: updates.title } : {}),
+          ...(updates.location ? { location: updates.location } : {}),
+          ...(slotISO ? { time: formatPlanTime(slotISO), rawTime: slotISO } : {}),
+        });
+      }
+
+      if (inviteIds.length > 0) {
+        await inviteMoreToPlan(plan.dbId, inviteIds);
+        showToast(`Invited ${inviteIds.length} friend${inviteIds.length > 1 ? 's' : ''}! ✅`);
+      } else if (Object.keys(updates).length > 0) {
+        showToast('Plan updated! ✅');
+      }
+
+      if (Object.keys(updates).length === 0 && inviteIds.length === 0) {
+        handleClose();
+        return;
+      }
+      handleClose();
+    } catch {
+      showToast('Connection error — check your internet');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!confirmCancel) { setConfirmCancel(true); return; }
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      await cancelPlan(plan.dbId);
+      try {
+        const groupId = await getGroupChatForPlan(plan.dbId);
+        if (groupId) await sendSystemMessage(groupId, userId, '📢 This plan has been cancelled.');
+      } catch { /* silent */ }
+      showToast('Plan cancelled');
+      onCancelled(plan.dbId);
+      handleClose();
+    } catch {
+      showToast('Connection error — check your internet');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  if (!plan) return null;
+
+  const activePeriod = TIME_PERIODS.find(p => p.day === selectedDay)!;
+
+  return (
+    <Modal visible={visible} transparent animationType="none" onRequestClose={handleClose}>
+      <View style={{ flex: 1 }}>
+        <TouchableWithoutFeedback onPress={handleClose}>
+          <View style={styles.sheetBackdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <Animated.View style={[est.sheet, { transform: [{ translateY: sheetY }] }]}>
+          <View style={styles.sheetHandle} />
+
+          {/* Header */}
+          <View style={styles.sheetHeaderRow}>
+            <Text style={[styles.sheetTitle, { flex: 1 }]}>Edit Plan</Text>
+            <TouchableOpacity onPress={handleClose} style={styles.sheetCloseBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="close" size={18} color={Colors.navy} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+
+            {/* Title */}
+            <Text style={est.fieldLabel}>TITLE</Text>
+            <TextInput
+              style={est.textInput}
+              value={customTitle}
+              onChangeText={setCustomTitle}
+              placeholder="Plan title..."
+              placeholderTextColor={Colors.gray300}
+            />
+
+            {/* Location */}
+            <Text style={[est.fieldLabel, { marginTop: 16 }]}>LOCATION</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={est.chipScroll}>
+              {LOCATIONS_DATA.map(loc => {
+                const sel = selectedLocation === loc.name;
+                return (
+                  <TouchableOpacity
+                    key={loc.name}
+                    style={[est.chip, sel && est.chipActive]}
+                    onPress={() => setSelectedLocation(loc.name)}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[est.chipText, sel && est.chipTextActive]}>{loc.name}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {/* Time */}
+            <Text style={[est.fieldLabel, { marginTop: 16 }]}>CHANGE TIME</Text>
+            <View style={est.dayToggleRow}>
+              {TIME_PERIODS.map(p => (
+                <TouchableOpacity
+                  key={p.day}
+                  style={[est.dayBtn, selectedDay === p.day && est.dayBtnActive]}
+                  onPress={() => { setSelectedDay(p.day as any); setSelectedSlot(''); }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[est.dayBtnText, selectedDay === p.day && est.dayBtnTextActive]}>{p.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {activePeriod.slots.map(slot => {
+              const sel = selectedSlot === slot.id;
+              return (
+                <TouchableOpacity
+                  key={slot.id}
+                  style={[est.slotRow, sel && est.slotRowActive]}
+                  onPress={() => setSelectedSlot(slot.id)}
+                  activeOpacity={0.85}
+                >
+                  <View>
+                    <Text style={[est.slotLabel, sel && est.slotLabelActive]}>{slot.label}</Text>
+                    <Text style={[est.slotSub, sel && est.slotSubActive]}>{slot.sub}</Text>
+                  </View>
+                  {sel && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
+                </TouchableOpacity>
+              );
+            })}
+
+            {/* Add more people */}
+            <Text style={[est.fieldLabel, { marginTop: 16 }]}>ADD PEOPLE</Text>
+            <FriendInviteGrid
+              selected={inviteIds}
+              onToggle={(id) => setInviteIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
+            />
+
+            {/* Cancel plan */}
+            <TouchableOpacity
+              style={[est.cancelBtn, confirmCancel && est.cancelBtnConfirm, cancelling && { opacity: 0.6 }]}
+              onPress={handleCancel}
+              disabled={cancelling}
+              activeOpacity={0.85}
+            >
+              {cancelling
+                ? <ActivityIndicator size="small" color={confirmCancel ? '#FFFFFF' : '#CC3333'} />
+                : <Text style={[est.cancelBtnText, confirmCancel && est.cancelBtnTextConfirm]}>
+                    {confirmCancel ? 'Tap again to confirm cancel' : 'Cancel Plan'}
+                  </Text>
+              }
+            </TouchableOpacity>
+
+            <View style={{ height: 120 }} />
+          </ScrollView>
+
+          {/* Save */}
+          <View style={est.footer}>
+            <TouchableOpacity
+              style={[est.saveBtn, saving && { opacity: 0.6 }]}
+              onPress={handleSave}
+              disabled={saving}
+              activeOpacity={0.85}
+            >
+              {saving
+                ? <ActivityIndicator size="small" color="#FFFFFF" />
+                : <Text style={est.saveBtnText}>SAVE CHANGES</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
       </View>
     </Modal>
   );
 }
 
 // ─── Plans screen ─────────────────────────────────────────────────────────────
-export default function PlansScreen() {
+export default function PlansScreen({ onModalChange }: { onModalChange?: (open: boolean) => void }) {
   const [dark, setDarkMode] = useState(isDark());
   useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
 
@@ -838,43 +1281,118 @@ export default function PlansScreen() {
 
   const { user } = useAuth();
   const { friends: allFriends, loading: friendsLoading } = useFriends();
-  const onlineFriends = allFriends.filter(f => f.is_online);
+  const onlineFriends = allFriends;
   const [modalVisible, setModalVisible] = useState(false);
   const [editingPlan, setEditingPlan] = useState<{ title: string; location: string } | null>(null);
-  const [dbPlans, setDbPlans] = useState<typeof EXISTING_PLANS>([]);
+  const [editSheetPlan, setEditSheetPlan] = useState<any>(null);
+  const [editSheetVisible, setEditSheetVisible] = useState(false);
+  // My plans (created or already joined) shown first; public plans by others shown below
+  const [myDbPlans, setMyDbPlans] = useState<typeof EXISTING_PLANS>([]);
+  const [joinablePlans, setJoinablePlans] = useState<typeof EXISTING_PLANS>([]);
   const [loadingPlans, setLoadingPlans] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [notifOn, setNotifOn] = useState(true);
+  const [pendingInvites, setPendingInvites] = useState<PendingInviteDisplay[]>([]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening';
 
+  const toPlanRow = useCallback((p: Plan, uid: string) => ({
+    id: p.id,
+    dbId: p.id,
+    rawTime: p.time,
+    title: p.title,
+    creator: (p as any).creator_id === uid ? 'You' : ((p as any).creator?.full_name ?? 'Unknown'),
+    location: p.location,
+    time: formatPlanTime(p.time),
+    visibility: p.visibility.toUpperCase(),
+    attendees: (p.attendees ?? []).map((a: any) => a.user?.avatar_initials ?? '??').slice(0, 4),
+    spots: 5,
+    weather: p.weather_snapshot
+      ? `${(p.weather_snapshot as any).emoji} ${(p.weather_snapshot as any).temp}°C`
+      : '⛅ —',
+  }), []);
+
+  const fetchPlans = useCallback(async () => {
+    if (!user) return;
+    const [mine, pub] = await Promise.all([getMyPlans(user.id), getPublicPlans()]);
+    const myIds = new Set(mine.map(p => p.id));
+    setMyDbPlans(sortByTime(mine.map(p => toPlanRow(p, user.id))) as any);
+    setJoinablePlans(sortByTime(
+      pub
+        .filter(p => (p as any).creator_id !== user.id && !myIds.has(p.id))
+        .map(p => toPlanRow(p, user.id))
+    ) as any);
+  }, [user?.id, toPlanRow]);
+
+  useEffect(() => {
+    setLoadingPlans(true);
+    fetchPlans().finally(() => setLoadingPlans(false));
+  }, [fetchPlans]);
+
   useEffect(() => {
     if (!user) return;
-    setLoadingPlans(true);
-    Promise.all([getMyPlans(user.id), getPublicPlans()])
-      .then(([mine, pub]) => {
-        const seen = new Set<string>();
-        const merged = [...mine, ...pub].filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
-        setDbPlans(sortByTime(merged.map(p => ({
-          id: p.id,
-          dbId: p.id,
-          rawTime: p.time,
-          title: p.title,
-          creator: (p as any).creator_id === user.id ? 'You' : ((p as any).creator?.full_name ?? 'Unknown'),
-          location: p.location,
-          time: formatPlanTime(p.time),
-          visibility: p.visibility.toUpperCase(),
-          attendees: (p.attendees ?? []).map((a: any) => a.user?.avatar_initials ?? '??').slice(0, 4),
-          spots: 5,
-          weather: p.weather_snapshot
-            ? `${(p.weather_snapshot as any).emoji} ${(p.weather_snapshot as any).temp}°C`
-            : '⛅ —',
-        }))) as any);
-      })
-      .finally(() => setLoadingPlans(false));
+    getPendingInvites(user.id).then(setPendingInvites);
   }, [user?.id]);
 
-  const activePlans = dbPlans.length > 0 ? dbPlans : EXISTING_PLANS;
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToPlanInvites(user.id, (invite) => {
+      setPendingInvites(prev => {
+        if (prev.some(i => i.inviteId === invite.inviteId)) return prev;
+        return [invite, ...prev];
+      });
+    });
+    return unsub;
+  }, [user?.id]);
+
+  useEffect(() => {
+    notifyPlanInviteCount(pendingInvites.length);
+  }, [pendingInvites.length]);
+
+  const handleInviteAccepted = useCallback(async (inviteId: string) => {
+    setPendingInvites(prev => prev.filter(i => i.inviteId !== inviteId));
+    await fetchPlans();
+  }, [fetchPlans]);
+
+  const handleInviteDeclined = useCallback((inviteId: string) => {
+    setPendingInvites(prev => prev.filter(i => i.inviteId !== inviteId));
+  }, []);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    const tasks: Promise<any>[] = [fetchPlans()];
+    if (user) tasks.push(getPendingInvites(user.id).then(setPendingInvites));
+    await Promise.all(tasks);
+    setRefreshing(false);
+  }, [fetchPlans, user?.id]);
+
+  const handlePlanUpdated = useCallback((planId: string, updates: { title?: string; location?: string; time?: string; rawTime?: string }) => {
+    setMyDbPlans(prev => prev.map(p => (p as any).dbId === planId ? { ...p, ...updates } : p) as any);
+  }, []);
+
+  const handlePlanCancelled = useCallback((planId: string) => {
+    setMyDbPlans(prev => prev.filter(p => (p as any).dbId !== planId));
+  }, []);
+
+  const handlePlanLeft = useCallback((planId: string) => {
+    setMyDbPlans(prev => prev.filter(p => (p as any).dbId !== planId));
+  }, []);
+
+  // When a user joins a public plan: remove from joinable list and add to my plans
+  const handlePlanJoined = useCallback((planId: string) => {
+    setJoinablePlans(prev => {
+      const plan = prev.find(p => (p as any).dbId === planId);
+      if (plan) {
+        const updated = { ...plan, creator: 'You' } as any;
+        setMyDbPlans(mp => sortByTime([updated, ...mp]) as any);
+      }
+      return prev.filter(p => (p as any).dbId !== planId);
+    });
+  }, []);
+
+  const activeMyPlans = myDbPlans.length > 0 ? myDbPlans : EXISTING_PLANS.filter(p => p.creator === 'You');
+  const activeJoinable = joinablePlans.length > 0 ? joinablePlans : EXISTING_PLANS.filter(p => p.creator !== 'You');
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bg }]} edges={['top']}>
@@ -882,6 +1400,14 @@ export default function PlansScreen() {
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={bg === Colors.lightGrey ? '#001845' : '#FFFFFF'}
+            colors={['#001845']}
+          />
+        }
       >
         {/* ── Header ── */}
         <View style={styles.header}>
@@ -902,8 +1428,24 @@ export default function PlansScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* ── Invited to ── */}
+        {pendingInvites.length > 0 && (
+          <>
+            <Text style={[styles.sectionLabel, { color: textPrimary }]}>Invited to</Text>
+            {pendingInvites.map(invite => (
+              <InviteCard
+                key={invite.inviteId}
+                invite={invite}
+                userId={user!.id}
+                onAccepted={handleInviteAccepted}
+                onDeclined={handleInviteDeclined}
+              />
+            ))}
+          </>
+        )}
+
         {/* ── Make Plan ── */}
-        <TouchableOpacity style={styles.createCta} onPress={() => setModalVisible(true)} activeOpacity={0.85}>
+        <TouchableOpacity style={styles.createCta} onPress={() => { setModalVisible(true); onModalChange?.(true); }} activeOpacity={0.85}>
           <Text style={styles.ctaTitle}>Make Plan</Text>
           <Ionicons name="chevron-forward" size={26} color="#FFFFFF" />
         </TouchableOpacity>
@@ -935,36 +1477,66 @@ export default function PlansScreen() {
         {/* ── Suggested for today ── */}
         <Text style={[styles.sectionLabel, { color: textPrimary }]}>Suggested for today</Text>
         {SUGGESTED_PLANS.map(plan => (
-          <SuggestedCard key={plan.id} plan={plan} />
+          <SuggestedCard key={plan.id} plan={plan} onModalChange={onModalChange} />
         ))}
 
-        {/* ── Upcoming plans ── */}
-        <Text style={[styles.sectionLabel, { marginTop: 8, color: textPrimary }]}>Upcoming plans</Text>
+        {/* ── My Plans ── */}
+        <Text style={[styles.sectionLabel, { marginTop: 8, color: textPrimary }]}>My plans</Text>
         {loadingPlans && (
           <ActivityIndicator color={Colors.navy} style={{ marginBottom: 12 }} />
         )}
-        {activePlans.map(plan => (
+        {activeMyPlans.length === 0 && !loadingPlans && (
+          <Text style={[styles.emptyHint, { color: textMuted }]}>No plans yet — make one above.</Text>
+        )}
+        {activeMyPlans.map(plan => (
           <PlanCard
             key={plan.id}
             plan={plan}
             currentUserId={user?.id}
             onEdit={plan.creator === 'You'
-              ? () => { setEditingPlan({ title: plan.title, location: plan.location }); setModalVisible(true); }
+              ? () => { setEditSheetPlan(plan); setEditSheetVisible(true); onModalChange?.(true); }
               : undefined}
+            onLeft={handlePlanLeft}
           />
         ))}
+
+        {/* ── Join a plan ── */}
+        {(activeJoinable.length > 0 || loadingPlans) && (
+          <>
+            <Text style={[styles.sectionLabel, { marginTop: 8, color: textPrimary }]}>Join a plan</Text>
+            {activeJoinable.map(plan => (
+              <PlanCard
+                key={plan.id}
+                plan={plan}
+                currentUserId={user?.id}
+                onJoined={handlePlanJoined}
+              />
+            ))}
+          </>
+        )}
 
         <View style={{ height: 120 }} />
       </ScrollView>
 
       <CreatePlanModal
         visible={modalVisible}
-        onClose={() => { setModalVisible(false); setEditingPlan(null); }}
+        onClose={() => { setModalVisible(false); setEditingPlan(null); onModalChange?.(false); }}
         initialValues={editingPlan ?? undefined}
         onCreated={newPlan => {
-          setDbPlans(prev => sortByTime([newPlan, ...prev]) as any);
+          setMyDbPlans(prev => sortByTime([newPlan, ...prev]) as any);
         }}
       />
+
+      {editSheetPlan && (
+        <PlanEditSheet
+          plan={editSheetPlan}
+          visible={editSheetVisible}
+          onClose={() => { setEditSheetVisible(false); onModalChange?.(false); }}
+          userId={user!.id}
+          onUpdated={handlePlanUpdated}
+          onCancelled={handlePlanCancelled}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -1005,7 +1577,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 4,
-    ...Shadows.sm,
+  },
+
+  emptyHint: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.medium,
+    color: Colors.gray500,
+    marginBottom: 16,
   },
 
   // Make Plan CTA
@@ -1079,7 +1657,7 @@ const styles = StyleSheet.create({
   },
   suggestedCard: {
     flex: 1,
-    backgroundColor: DARK,
+    backgroundColor: Colors.navy,
     borderRadius: 16,
     paddingHorizontal: 20,
     paddingTop: 20,
@@ -1088,7 +1666,7 @@ const styles = StyleSheet.create({
   bookmarkTab: {
     width: 54,
     height: 54,
-    backgroundColor: CARD,
+    backgroundColor: Colors.navy,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1117,7 +1695,7 @@ const styles = StyleSheet.create({
 
   // Plan cards — dark navy
   planCard: {
-    backgroundColor: CARD,
+    backgroundColor: Colors.navy,
     borderRadius: 16,
     padding: 18,
     marginBottom: 12,
@@ -1204,7 +1782,7 @@ const styles = StyleSheet.create({
   joinBtnText: {
     fontSize: 12,
     fontWeight: Typography.weights.black,
-    color: DARK,
+    color: Colors.navy,
   },
   joinedBtn: {
     backgroundColor: 'rgba(255,255,255,0.15)',
@@ -1274,9 +1852,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: Colors.bluePale,
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
     marginBottom: 8,
@@ -1321,7 +1899,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 22,
     fontWeight: Typography.weights.black,
-    color: DARK,
+    color: Colors.navy,
     letterSpacing: -0.5,
   },
   sheetCloseBtn: {
@@ -1391,22 +1969,87 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: 'transparent',
     borderWidth: 2,
-    borderColor: DARK,
+    borderColor: Colors.navy,
     borderRadius: 12,
     paddingVertical: 15,
   },
   addDayBtnActive: {
-    backgroundColor: DARK,
-    borderColor: DARK,
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
   },
   addDayBtnText: {
     fontSize: Typography.sizes.md,
     fontWeight: Typography.weights.black,
-    color: DARK,
+    color: Colors.navy,
     letterSpacing: 0.3,
   },
   addDayBtnTextActive: {
     color: '#FFFFFF',
+  },
+
+  // Invite cards
+  inviteCard: {
+    backgroundColor: Colors.navy,
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  inviteTitle: {
+    fontSize: Typography.sizes.lg,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+    letterSpacing: -0.4,
+    marginBottom: 3,
+  },
+  inviteMeta: {
+    fontSize: Typography.sizes.sm,
+    color: 'rgba(255,255,255,0.55)',
+    fontWeight: Typography.weights.medium,
+  },
+  inviteWeather: {
+    fontSize: Typography.sizes.sm,
+    color: 'rgba(255,255,255,0.38)',
+    fontWeight: Typography.weights.medium,
+    marginTop: 2,
+  },
+  inviteFrom: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.5)',
+    fontWeight: Typography.weights.medium,
+    marginTop: 4,
+  },
+  inviteActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  inviteDeclineBtn: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inviteDeclineBtnText: {
+    fontSize: 13,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.7)',
+  },
+  inviteAcceptBtn: {
+    flex: 2,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inviteAcceptBtnText: {
+    fontSize: 13,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
   },
 
   // CreatePlanModal
@@ -1426,9 +2069,9 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    borderTopWidth: Borders.widthHeavy,
-    borderLeftWidth: Borders.widthHeavy,
-    borderRightWidth: Borders.widthHeavy,
+    borderTopWidth: 2,
+    borderLeftWidth: 2,
+    borderRightWidth: 2,
     borderColor: Colors.black,
     padding: 24,
     maxHeight: '92%',
@@ -1439,9 +2082,9 @@ const styles = StyleSheet.create({
   fieldLabel: { fontSize: Typography.sizes.xs, fontWeight: Typography.weights.black, letterSpacing: 2, color: Colors.gray500, marginBottom: 8, marginTop: 4 },
   input: {
     backgroundColor: Colors.white,
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 13,
     fontSize: Typography.sizes.md,
@@ -1451,18 +2094,18 @@ const styles = StyleSheet.create({
   },
   chipScroll: { marginBottom: 18 },
   chip: {
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 8,
     marginRight: 8,
     backgroundColor: Colors.white,
   },
   timeChip: {
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginRight: 8,
@@ -1472,24 +2115,24 @@ const styles = StyleSheet.create({
   chipText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.navy },
   chipTextActive: { color: Colors.white },
   visRow: { flexDirection: 'row', gap: 8, marginBottom: 16 },
-  visBtn: { flex: 1, borderWidth: Borders.width, borderColor: Colors.black, borderRadius: Borders.radius, paddingVertical: 10, alignItems: 'center' },
+  visBtn: { flex: 1, borderWidth: 1.5, borderColor: Colors.black, borderRadius: 10, paddingVertical: 10, alignItems: 'center' },
   visBtnActive: { backgroundColor: Colors.navy },
   visBtnText: { fontSize: 11, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.navy },
   visBtnTextActive: { color: Colors.white },
   publicNote: {
     backgroundColor: Colors.greenLight,
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 10,
     padding: 12,
     marginBottom: 16,
   },
   publicNoteText: { fontSize: Typography.sizes.xs, color: Colors.green, fontWeight: Typography.weights.bold, letterSpacing: 0.5 },
   weatherPreview: {
     backgroundColor: Colors.bluePale,
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 12,
     padding: 14,
     marginBottom: 20,
   },
@@ -1497,28 +2140,22 @@ const styles = StyleSheet.create({
   weatherPreviewValue: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.medium, color: Colors.navy },
   primaryBtn: {
     backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 14,
     paddingVertical: 16,
     alignItems: 'center',
     marginBottom: 8,
-    ...Shadows.md,
   },
   primaryBtnDisabled: { opacity: 0.4 },
   primaryBtnText: { color: Colors.white, fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, letterSpacing: 2 },
   modalBtnRow: { flexDirection: 'row', gap: 10, marginTop: 8, marginBottom: 8 },
-  backBtn: { flex: 1, borderWidth: Borders.width, borderColor: Colors.black, borderRadius: Borders.radius, paddingVertical: 14, alignItems: 'center' },
+  backBtn: { flex: 1, borderWidth: 1.5, borderColor: Colors.black, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
   backBtnText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, letterSpacing: 2, color: Colors.navy },
   createBtn: {
     flex: 2,
     backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 12,
     paddingVertical: 14,
     alignItems: 'center',
-    ...Shadows.sm,
   },
   createBtnText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, letterSpacing: 2, color: Colors.white },
 });
@@ -1722,4 +2359,219 @@ const mst = StyleSheet.create({
   },
   nextBtnOff: { opacity: 0.35 },
   nextBtnTxt: { fontSize: 12, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: '#FFFFFF' },
+
+  // Day toggle (step 2)
+  dayToggleRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 20,
+  },
+  dayBtn: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: Colors.white,
+  },
+  dayBtnActive: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
+  dayBtnText: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1.5,
+    color: Colors.navy,
+  },
+  dayBtnTextActive: { color: '#FFFFFF' },
+
+  // Duration slider (step 2)
+  durationWrap: {
+    marginTop: 20,
+    marginBottom: 8,
+    padding: 16,
+    backgroundColor: Colors.gray100,
+    borderRadius: 14,
+  },
+  durationHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  durationHeadLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+    color: Colors.gray500,
+  },
+  durationValueLabel: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+  },
+  durRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  durConnector: {
+    flex: 1,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: Colors.gray300,
+  },
+  durConnectorActive: {
+    backgroundColor: Colors.navy,
+  },
+  durDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: Colors.white,
+    borderWidth: 2,
+    borderColor: Colors.gray300,
+  },
+  durDotPast: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
+  durDotCurrent: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: Colors.navy,
+    borderWidth: 3,
+    borderColor: Colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.22,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  durLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  durLabelText: {
+    fontSize: 9,
+    fontWeight: Typography.weights.bold,
+    color: Colors.gray500,
+    textAlign: 'center',
+  },
+});
+
+// ─── Edit sheet styles ────────────────────────────────────────────────────────
+const est = StyleSheet.create({
+  sheet: {
+    position: 'absolute',
+    bottom: 0, left: 0, right: 0,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderTopWidth: 2, borderLeftWidth: 2, borderRightWidth: 2,
+    borderColor: Colors.black,
+    paddingTop: 16,
+    paddingHorizontal: 20,
+    maxHeight: '92%',
+  },
+  fieldLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+    color: Colors.gray500,
+    marginBottom: 10,
+  },
+  textInput: {
+    borderWidth: 1.5,
+    borderColor: Colors.black,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: Typography.sizes.md,
+    color: Colors.navy,
+    fontWeight: Typography.weights.medium,
+    backgroundColor: Colors.white,
+  },
+  chipScroll: {
+    gap: 8,
+    paddingBottom: 4,
+    flexDirection: 'row',
+  },
+  chip: {
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: Colors.white,
+  },
+  chipActive: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
+  chipText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.bold,
+    color: Colors.navy,
+  },
+  chipTextActive: { color: '#FFFFFF' },
+  dayToggleRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+  dayBtn: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 10,
+    paddingVertical: 8,
+    alignItems: 'center',
+    backgroundColor: Colors.white,
+  },
+  dayBtnActive: { backgroundColor: Colors.navy, borderColor: Colors.navy },
+  dayBtnText: { fontSize: 9, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.navy },
+  dayBtnTextActive: { color: '#FFFFFF' },
+  slotRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 6,
+    backgroundColor: Colors.white,
+  },
+  slotRowActive: { backgroundColor: Colors.navy, borderColor: Colors.navy },
+  slotLabel: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, color: Colors.navy, marginBottom: 2 },
+  slotLabelActive: { color: '#FFFFFF' },
+  slotSub: { fontSize: 11, color: Colors.gray500, fontWeight: Typography.weights.medium },
+  slotSubActive: { color: 'rgba(255,255,255,0.7)' },
+  cancelBtn: {
+    borderWidth: 1.5,
+    borderColor: '#CC3333',
+    borderRadius: 12,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  cancelBtnConfirm: { backgroundColor: '#CC3333' },
+  cancelBtnText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.black, color: '#CC3333' },
+  cancelBtnTextConfirm: { color: '#FFFFFF' },
+  footer: {
+    paddingTop: 14,
+    paddingBottom: 34,
+  },
+  saveBtn: {
+    backgroundColor: Colors.navy,
+    borderRadius: 12,
+    paddingVertical: 15,
+    alignItems: 'center',
+  },
+  saveBtnText: { fontSize: 12, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: '#FFFFFF' },
 });

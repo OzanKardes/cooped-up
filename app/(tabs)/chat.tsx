@@ -2,28 +2,43 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   Animated, Modal, TextInput, TouchableWithoutFeedback,
-  KeyboardAvoidingView, Platform, ActivityIndicator,
+  KeyboardAvoidingView, Platform, ActivityIndicator, RefreshControl, Image,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import * as ImagePicker from 'expo-image-picker';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { registerTabReset, triggerTabReset as _triggerTabReset } from '../../lib/tabResetStore';
 import { Ionicons } from '@expo/vector-icons';
 import BackArrow from '../../components/ui/BackArrow';
-import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
+import { Colors, Typography } from '../../constants/theme';
 import { isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
 import {
-  getDMs, getMessages,
+  getDMs, getMessages, getGroupMessages,
   sendMessage as dbSendMessage,
   sendGroupMessage as dbSendGroupMessage,
   subscribeToMessages,
   subscribeToGroupMessages,
+  subscribeToGroupMemberships,
+  subscribeToIncomingDMs,
+  getGroupsForUser,
+  leaveGroup,
+  addMembersToGroup,
+  sendSystemMessage,
+  getGroupMembers,
 } from '../../services/messages';
+import { cancelPlan, leavePlan, getPlanById } from '../../services/plans';
+import { notifyChatUnreadCount } from '../../lib/chatUnreadStore';
 import type { Message, User } from '../../types';
 import {
   searchUsers, sendFriendRequest, getFriends,
   getFriendRequests, getSentFriendRequests,
   acceptFriendRequest, declineFriendRequest,
+  subscribeToFriendRequests,
 } from '../../services/friends';
+import { checkAndUnlockBadges } from '../../services/badges';
+import { notifyBadgeUnlocked } from '../../lib/badgeQueue';
+import { getFriendCount } from '../../services/users';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const formatTime = (iso: string) =>
@@ -52,6 +67,7 @@ interface ChatMessage {
   plan?: PlanData;
   location?: LocationData;
   invite?: PlanData;
+  imageUri?: string;
 }
 
 interface GroupThread {
@@ -65,6 +81,8 @@ interface GroupThread {
   unread: number;
   isSystem?: boolean;
   messages: ChatMessage[];
+  planId?: string | null;
+  planCreatorId?: string | null;
 }
 
 interface DMThread {
@@ -72,10 +90,12 @@ interface DMThread {
   id: string;
   name: string;
   initials: string;
+  avatarUrl?: string | null;
   online: boolean;
   lastMsg: string;
   lastTime: string;
   unread: number;
+  isNew?: boolean;
 }
 
 type Thread = GroupThread | DMThread;
@@ -89,9 +109,17 @@ const CAMPUS_SPACES_SHARE = [
 ];
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
-function Avatar({ initials, size = 32, free = false }: {
-  initials: string; size?: number; free?: boolean;
+function Avatar({ initials, size = 32, free = false, uri }: {
+  initials: string; size?: number; free?: boolean; uri?: string | null;
 }) {
+  if (uri) {
+    return (
+      <Image
+        source={{ uri }}
+        style={[styles.avatar, { width: size, height: size, borderRadius: size / 2 }]}
+      />
+    );
+  }
   return (
     <View style={[styles.avatar, {
       width: size, height: size, borderRadius: size / 2,
@@ -275,15 +303,17 @@ function ReactionStrip({
 
 // ─── Message row ──────────────────────────────────────────────────────────────
 function MessageRow({
-  msg, reactions, isGroup, onLongPress, onAddReaction, inviteStates, onInviteRespond,
+  msg, reactions, isGroup, onLongPress, onAddReaction, inviteStates, onInviteRespond, dark, senderAvatarUrl,
 }: {
   msg: ChatMessage;
   reactions: Record<string, Record<string, number>>;
   isGroup: boolean;
+  senderAvatarUrl?: string | null;
   onLongPress: (id: string) => void;
   onAddReaction: (id: string, emoji: string) => void;
   inviteStates: Record<string, 'accepted' | 'declined'>;
   onInviteRespond: (id: string, response: 'accepted' | 'declined') => void;
+  dark: boolean;
 }) {
   if (msg.isSystem) {
     return (
@@ -295,13 +325,15 @@ function MessageRow({
 
   const isMe = msg.sender === 'ME';
   const msgReactions = reactions[msg.id];
+  const bubbleDark = dark && !isMe ? { backgroundColor: '#002060' } : undefined;
+  const bubbleMeDark = dark && isMe ? { backgroundColor: '#003087' } : undefined;
 
   return (
     <View style={[styles.msgRow, isMe && styles.msgRowMe]}>
-      {!isMe && <Avatar initials={msg.sender} size={28} />}
+      {!isMe && <Avatar initials={msg.sender} size={28} uri={senderAvatarUrl} />}
       <View style={[styles.msgCol, isMe && styles.msgColMe]}>
         {!isMe && isGroup && (
-          <Text style={styles.msgSender}>{msg.senderName}</Text>
+          <Text style={[styles.msgSender, dark && { color: 'rgba(255,255,255,0.55)' }]}>{msg.senderName}</Text>
         )}
         {msg.invite ? (
           <InviteCard
@@ -316,15 +348,18 @@ function MessageRow({
             delayLongPress={400}
             activeOpacity={0.88}
           >
-            <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+            <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther, msg.imageUri && styles.bubbleImage, bubbleDark, bubbleMeDark]}>
+              {msg.imageUri && (
+                <Image source={{ uri: msg.imageUri }} style={styles.msgImage} resizeMode="cover" />
+              )}
               {msg.text !== '' && (
-                <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe]}>
+                <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe, dark && !isMe && { color: '#FFFFFF' }]}>
                   {msg.text}
                 </Text>
               )}
               {msg.plan && <PlanPill plan={msg.plan} />}
               {msg.location && <LocationCard loc={msg.location} />}
-              <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe]}>
+              <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe, dark && { color: isMe ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.45)' }]}>
                 {msg.time}
               </Text>
             </View>
@@ -344,18 +379,29 @@ function MessageRow({
 }
 
 // ─── Chat thread ──────────────────────────────────────────────────────────────
-function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) {
+function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; onBack: () => void; dark: boolean; onModalChange?: (open: boolean) => void }) {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const isDM = thread.type === 'dm';
   const dm = isDM ? (thread as DMThread) : null;
 
   // UUID-format IDs are real DB threads; hardcoded IDs start with 'd'/'g'
   const isRealThread = thread.id.includes('-');
 
-  const [messages, setMessages] = useState<ChatMessage[]>(
-    isDM ? [] : [...(thread as GroupThread).messages]
-  );
-  const [loadingMessages, setLoadingMessages] = useState(isRealThread && isDM);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(isRealThread);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [addPeopleVisible, setAddPeopleVisible] = useState(false);
+  const [addPeopleFriends, setAddPeopleFriends] = useState<any[]>([]);
+  const [addPeopleSelected, setAddPeopleSelected] = useState<string[]>([]);
+  const [addingPeople, setAddingPeople] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [actioning, setActioning] = useState(false);
+
+  const groupThread = !isDM ? (thread as GroupThread) : null;
+  const isCreator = groupThread?.planCreatorId === user?.id;
+  const planId = groupThread?.planId ?? null;
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [reactionTarget, setReactionTarget] = useState<string | null>(null);
@@ -363,6 +409,92 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
   const [inviteStates, setInviteStates] = useState<Record<string, 'accepted' | 'declined'>>({});
   const [shareSpaceVisible, setShareSpaceVisible] = useState(false);
   const [unreadCount, setUnreadCount] = useState(thread.unread);
+
+  // Group info sheet
+  const [groupInfoVisible, setGroupInfoVisible] = useState(false);
+  const [groupInfoMembers, setGroupInfoMembers] = useState<{id: string; name: string; initials: string}[]>([]);
+  const [groupInfoPlan, setGroupInfoPlan] = useState<{title: string; location: string; time: string; emoji?: string; temp?: number} | null>(null);
+  const [leavingGroup, setLeavingGroup] = useState(false);
+  const [creatorLeaveConfirm, setCreatorLeaveConfirm] = useState(false);
+  const infoSheetY = useRef(new Animated.Value(700)).current;
+
+  const openGroupInfo = async () => {
+    if (!groupThread || !isRealThread) return;
+    setGroupInfoMembers([]);
+    setGroupInfoPlan(null);
+    setCreatorLeaveConfirm(false);
+    setGroupInfoVisible(true);
+    onModalChange?.(true);
+    infoSheetY.setValue(700);
+    Animated.spring(infoSheetY, { toValue: 0, useNativeDriver: true, tension: 50, friction: 12 }).start();
+    const members = await getGroupMembers(thread.id);
+    setGroupInfoMembers(members);
+    if (groupThread.planId) {
+      const plan = await getPlanById(groupThread.planId);
+      if (plan) {
+        const snap = plan.weather_snapshot as any;
+        setGroupInfoPlan({
+          title: plan.title,
+          location: plan.location,
+          time: plan.time,
+          emoji: snap?.emoji,
+          temp: snap?.temp,
+        });
+      }
+    }
+  };
+
+  const closeGroupInfo = () => {
+    Animated.spring(infoSheetY, { toValue: 700, useNativeDriver: true, tension: 50, friction: 12 }).start(() => {
+      setGroupInfoVisible(false);
+      setGroupInfoPlan(null);
+      setCreatorLeaveConfirm(false);
+    });
+    onModalChange?.(false);
+  };
+
+  const handleLeaveGroup = async () => {
+    if (leavingGroup || !user) return;
+    if (isCreator && groupThread?.planId && !creatorLeaveConfirm) {
+      setCreatorLeaveConfirm(true);
+      return;
+    }
+    setLeavingGroup(true);
+    try {
+      if (groupThread?.planId) {
+        await leavePlan(groupThread.planId, user.id);
+      }
+      await leaveGroup(thread.id, user.id);
+      setGroupInfoVisible(false);
+      onModalChange?.(false);
+      showToast('You left the plan');
+      onBack();
+    } catch {
+      showToast('Connection error — check your internet');
+    } finally {
+      setLeavingGroup(false);
+    }
+  };
+
+  const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') { showToast('Photo library access denied'); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      const uri = result.assets[0].uri;
+      setMessages(prev => [...prev, {
+        id: `m_${Date.now()}`,
+        sender: 'ME',
+        senderName: 'You',
+        text: '',
+        time: 'now',
+        imageUri: uri,
+      }]);
+    }
+  };
   const scrollRef = useRef<ScrollView>(null);
 
   // Scroll to bottom on open
@@ -375,20 +507,35 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
   }, [messages.length, isTyping]);
 
-  // Load message history for real DM threads
+  // Load message history for real threads (DM and group)
   useEffect(() => {
-    if (!isRealThread || !isDM || !user) return;
-    getMessages(user.id, thread.id).then(data => {
-      setMessages(data.map(msg => ({
-        id: msg.id,
-        sender: msg.sender_id === user.id ? 'ME' : (dm?.initials ?? '??'),
-        senderName: msg.sender_id === user.id ? 'You' : (dm?.name ?? 'User'),
-        text: msg.content,
-        time: formatTime(msg.created_at),
-      })));
-      setLoadingMessages(false);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
-    });
+    if (!isRealThread || !user) return;
+    if (isDM) {
+      getMessages(user.id, thread.id).then(data => {
+        setMessages(data.map(msg => ({
+          id: msg.id,
+          sender: msg.sender_id === user.id ? 'ME' : (dm?.initials ?? '??'),
+          senderName: msg.sender_id === user.id ? 'You' : (dm?.name ?? 'User'),
+          text: msg.content,
+          time: formatTime(msg.created_at),
+        })));
+        setLoadingMessages(false);
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
+      });
+    } else {
+      getGroupMessages(thread.id).then(data => {
+        setMessages(data.map(msg => ({
+          id: msg.id,
+          sender: msg.sender_id === user.id ? 'ME' : (msg.sender?.avatar_initials ?? msg.sender_id.slice(0, 2).toUpperCase()),
+          senderName: msg.sender_id === user.id ? 'You' : (msg.sender?.full_name?.split(' ')[0] ?? 'Member'),
+          text: msg.content,
+          time: formatTime(msg.created_at),
+          isSystem: msg.content.startsWith('📢 '),
+        })));
+        setLoadingMessages(false);
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
+      });
+    }
   }, [isRealThread, isDM, user?.id, thread.id]);
 
   // Realtime subscription for real DB threads
@@ -423,15 +570,14 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
       });
     } else {
       unsubscribe = subscribeToGroupMessages(thread.id, (msg: Message) => {
-        // Own messages already shown optimistically — skip
         if (msg.sender_id === user?.id) return;
-
         setMessages(prev => [...prev, {
           id: msg.id,
           sender: msg.sender_id.slice(0, 2).toUpperCase(),
           senderName: 'Member',
           text: msg.content,
           time: formatTime(msg.created_at),
+          isSystem: msg.content.startsWith('📢 '),
         }]);
       });
     }
@@ -457,9 +603,12 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
     const body = text ?? inputText.trim();
     if (!body && !loc) return;
 
-    // Optimistic append for all threads
+    // Stable ID for this optimistic message so we can remove it on failure
+    const optId = `opt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+    // Optimistic append — appears immediately before network round-trip
     setMessages(prev => [...prev, {
-      id: `m_${Date.now()}`,
+      id: optId,
       sender: 'ME',
       senderName: 'You',
       text: body,
@@ -468,22 +617,22 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
     }]);
     if (!loc) setInputText('');
 
-    // Real DB send
+    // Persist to DB — on failure roll back the optimistic message
     if (isRealThread && user) {
-      try {
-        if (isDM) {
-          await dbSendMessage(user.id, thread.id, body);
-        } else {
-          await dbSendGroupMessage(user.id, thread.id, body);
-        }
-      } catch {
-        showToast('Message failed to send');
+      const { error } = isDM
+        ? await dbSendMessage(user.id, thread.id, body)
+        : await dbSendGroupMessage(user.id, thread.id, body);
+
+      if (error) {
+        setMessages(prev => prev.filter(m => m.id !== optId));
+        showToast('Failed to send');
       }
     }
   };
 
   const sendSpace = (space: typeof CAMPUS_SPACES_SHARE[0]) => {
     setShareSpaceVisible(false);
+    onModalChange?.(false);
     sendMessage('', { name: space.name, status: space.status, weather: space.weather });
   };
 
@@ -491,17 +640,65 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
     ? (dm!.online ? '🟢 Online now' : '⚫ Offline')
     : `${(thread as GroupThread).memberCount} members`;
 
+  const D = dark ? {
+    threadBg: '#001233', headerBg: '#001845', headerBorder: 'rgba(255,255,255,0.12)',
+    backBg: 'rgba(255,255,255,0.1)', backIcon: '#FFFFFF' as string,
+    nameColor: '#FFFFFF', subColor: 'rgba(255,255,255,0.55)',
+    inputBarBg: '#001845', inputBarBorder: 'rgba(255,255,255,0.12)',
+    btnBg: '#002060', btnBorder: 'rgba(255,255,255,0.15)',
+    inputBg: '#002060', inputBorder: 'rgba(255,255,255,0.15)',
+    inputText: '#FFFFFF' as string, inputPlaceholder: 'rgba(255,255,255,0.35)',
+    reactionBg: '#001845', reactionBorder: 'rgba(255,255,255,0.2)',
+    sheetBg: '#001845', sheetBorder: 'rgba(255,255,255,0.15)',
+    sheetTitle: 'rgba(255,255,255,0.55)', sheetRowBg: '#002060',
+    sheetRowBorder: 'rgba(255,255,255,0.12)', sheetName: '#FFFFFF' as string,
+    pillBg: 'rgba(255,255,255,0.12)', pillBorder: 'rgba(255,255,255,0.2)',
+    pillText: '#FFFFFF' as string, weatherColor: 'rgba(255,255,255,0.55)',
+  } : {
+    threadBg: Colors.lightGrey, headerBg: Colors.white, headerBorder: Colors.gray100,
+    backBg: 'rgba(0,0,0,0.06)', backIcon: Colors.navy as string,
+    nameColor: Colors.navy, subColor: Colors.gray500,
+    inputBarBg: Colors.white, inputBarBorder: Colors.gray100,
+    btnBg: Colors.gray100, btnBorder: Colors.gray100,
+    inputBg: Colors.gray100, inputBorder: Colors.gray300,
+    inputText: Colors.black as string, inputPlaceholder: Colors.gray300,
+    reactionBg: Colors.white, reactionBorder: Colors.gray100,
+    sheetBg: Colors.white, sheetBorder: Colors.black,
+    sheetTitle: Colors.gray500, sheetRowBg: Colors.white,
+    sheetRowBorder: Colors.gray100, sheetName: Colors.navy as string,
+    pillBg: Colors.bluePale, pillBorder: Colors.gray100,
+    pillText: Colors.navy as string, weatherColor: Colors.gray500,
+  };
+
   return (
-    <View style={styles.thread}>
+    <View style={[styles.thread, { backgroundColor: D.threadBg }]}>
       {/* Thread header */}
-      <View style={styles.threadHeader}>
-        <TouchableOpacity style={styles.backBtn} onPress={onBack} activeOpacity={0.75}>
-          <Text style={styles.backArrow}>←</Text>
+      <View style={[styles.threadHeader, { backgroundColor: D.headerBg, borderBottomColor: D.headerBorder, paddingTop: insets.top + 12 }]}>
+        <TouchableOpacity style={[styles.backBtn, { backgroundColor: D.backBg }]} onPress={onBack} activeOpacity={0.75}>
+          <Ionicons name="chevron-back" size={22} color={D.backIcon} />
         </TouchableOpacity>
         <View style={styles.threadHeaderInfo}>
-          <Text style={styles.threadName} numberOfLines={1}>{thread.name}</Text>
-          <Text style={styles.threadSub}>{headerSub}</Text>
+          {(!isDM && isRealThread) ? (
+            <TouchableOpacity onPress={openGroupInfo} activeOpacity={0.75}>
+              <Text style={[styles.threadName, { color: D.nameColor }]} numberOfLines={1}>{thread.name}</Text>
+              <Text style={[styles.threadSub, { color: D.subColor }]}>{headerSub} · tap for info</Text>
+            </TouchableOpacity>
+          ) : (
+            <>
+              <Text style={[styles.threadName, { color: D.nameColor }]} numberOfLines={1}>{thread.name}</Text>
+              <Text style={[styles.threadSub, { color: D.subColor }]}>{headerSub}</Text>
+            </>
+          )}
         </View>
+        {!isDM && (
+          <TouchableOpacity
+            style={[styles.backBtn, { backgroundColor: D.backBg }]}
+            onPress={() => { setMenuVisible(true); setConfirmLeave(false); setConfirmEnd(false); onModalChange?.(true); }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="ellipsis-horizontal" size={20} color={D.backIcon} />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Messages + input */}
@@ -528,16 +725,18 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
                 msg={msg}
                 reactions={reactions}
                 isGroup={!isDM}
-                onLongPress={setReactionTarget}
+                onLongPress={id => { setReactionTarget(id); onModalChange?.(true); }}
                 onAddReaction={addReaction}
                 inviteStates={inviteStates}
                 onInviteRespond={respondToInvite}
+                dark={dark}
+                senderAvatarUrl={isDM && msg.sender !== 'ME' ? dm?.avatarUrl : undefined}
               />
             ))}
             {isTyping && dm && (
               <View style={styles.msgRow}>
-                <Avatar initials={dm.initials} size={28} />
-                <View style={styles.bubble}>
+                <Avatar initials={dm.initials} size={28} uri={dm.avatarUrl} />
+                <View style={[styles.bubble, dark && { backgroundColor: '#002060' }]}>
                   <TypingDots />
                 </View>
               </View>
@@ -562,18 +761,25 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
         </View>
 
         {/* Input bar */}
-        <View style={styles.inputBar}>
+        <View style={[styles.inputBar, { backgroundColor: D.inputBarBg, borderTopColor: D.inputBarBorder }]}>
           <TouchableOpacity
-            style={styles.shareSpaceBtn}
-            onPress={() => setShareSpaceVisible(true)}
+            style={[styles.shareSpaceBtn, { backgroundColor: D.btnBg, borderColor: D.btnBorder }]}
+            onPress={() => { setShareSpaceVisible(true); onModalChange?.(true); }}
             activeOpacity={0.8}
           >
             <Text style={styles.shareSpaceIcon}>📍</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.shareSpaceBtn, { backgroundColor: D.btnBg, borderColor: D.btnBorder }]}
+            onPress={pickImage}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="image-outline" size={20} color={D.backIcon} />
+          </TouchableOpacity>
           <TextInput
-            style={styles.chatInput}
+            style={[styles.chatInput, { backgroundColor: D.inputBg, color: D.inputText, borderColor: D.inputBorder }]}
             placeholder="Message..."
-            placeholderTextColor={Colors.gray300}
+            placeholderTextColor={D.inputPlaceholder}
             value={inputText}
             onChangeText={setInputText}
             multiline
@@ -595,13 +801,13 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
         visible={!!reactionTarget}
         transparent
         animationType="fade"
-        onRequestClose={() => setReactionTarget(null)}
+        onRequestClose={() => { setReactionTarget(null); onModalChange?.(false); }}
       >
-        <TouchableWithoutFeedback onPress={() => setReactionTarget(null)}>
-          <View style={StyleSheet.absoluteFill} />
+        <TouchableWithoutFeedback onPress={() => { setReactionTarget(null); onModalChange?.(false); }}>
+          <View style={StyleSheet.absoluteFill} pointerEvents="box-only" />
         </TouchableWithoutFeedback>
         <View style={styles.reactionOverlay} pointerEvents="box-none">
-          <View style={styles.reactionBox}>
+          <View style={[styles.reactionBox, { backgroundColor: D.reactionBg, borderColor: D.reactionBorder }]}>
             {REACTION_EMOJIS.map(e => (
               <TouchableOpacity
                 key={e}
@@ -609,6 +815,7 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
                 onPress={() => {
                   if (reactionTarget) addReaction(reactionTarget, e);
                   setReactionTarget(null);
+                  onModalChange?.(false);
                 }}
               >
                 <Text style={styles.reactionEmoji}>{e}</Text>
@@ -623,31 +830,313 @@ function ChatThread({ thread, onBack }: { thread: Thread; onBack: () => void }) 
         visible={shareSpaceVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setShareSpaceVisible(false)}
+        onRequestClose={() => { setShareSpaceVisible(false); onModalChange?.(false); }}
       >
-        <TouchableWithoutFeedback onPress={() => setShareSpaceVisible(false)}>
-          <View style={styles.spaceSheetBackdrop} />
+        <TouchableWithoutFeedback onPress={() => { setShareSpaceVisible(false); onModalChange?.(false); }}>
+          <View style={styles.spaceSheetBackdrop} pointerEvents="box-only" />
         </TouchableWithoutFeedback>
-        <View style={styles.spaceSheet}>
-          <Text style={styles.spaceSheetTitle}>SHARE A SPACE</Text>
-          {CAMPUS_SPACES_SHARE.map(space => (
+        <TouchableWithoutFeedback onPress={() => {}}>
+          <View style={[styles.spaceSheet, { backgroundColor: D.sheetBg, borderColor: D.sheetBorder }]}>
+            <Text style={[styles.spaceSheetTitle, { color: D.sheetTitle }]}>SHARE A SPACE</Text>
+            {CAMPUS_SPACES_SHARE.map(space => (
+              <TouchableOpacity
+                key={space.name}
+                style={[styles.spaceSheetRow, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }]}
+                onPress={() => sendSpace(space)}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.spaceSheetName, { color: D.sheetName }]}>{space.name}</Text>
+                <View style={styles.spaceSheetRight}>
+                  <View style={[styles.spaceStatusPill, { backgroundColor: D.pillBg, borderColor: D.pillBorder }]}>
+                    <Text style={[styles.spaceStatusText, { color: D.pillText }]}>{space.status}</Text>
+                  </View>
+                  <Text style={[styles.spaceWeather, { color: D.weatherColor }]}>{space.weather}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+            <View style={{ height: 24 }} />
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      {/* ── Group chat menu ─────────────────────────────────────────────────── */}
+      <Modal
+        visible={menuVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => { setMenuVisible(false); onModalChange?.(false); }}
+      >
+        <TouchableWithoutFeedback onPress={() => { setMenuVisible(false); setConfirmLeave(false); setConfirmEnd(false); onModalChange?.(false); }}>
+          <View style={styles.spaceSheetBackdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <View style={[styles.spaceSheet, { backgroundColor: D.sheetBg, borderColor: D.sheetBorder, paddingBottom: 32 }]}>
+          <View style={styles.sheetDragHandle} />
+          <Text style={[styles.spaceSheetTitle, { color: D.sheetTitle }]}>GROUP OPTIONS</Text>
+
+          {/* Add people */}
+          <TouchableOpacity
+            style={[styles.menuRow, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }]}
+            onPress={() => {
+              setMenuVisible(false);
+              setAddPeopleSelected([]);
+              setAddPeopleFriends([]);
+              setAddPeopleVisible(true);
+              if (user) getFriends(user.id).then(setAddPeopleFriends);
+            }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="person-add-outline" size={20} color={D.sheetName} />
+            <Text style={[styles.menuRowText, { color: D.sheetName }]}>Add people</Text>
+            <Ionicons name="chevron-forward" size={16} color={D.subColor as string} />
+          </TouchableOpacity>
+
+          {/* Leave chat */}
+          <TouchableOpacity
+            style={[styles.menuRow, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }, actioning && { opacity: 0.6 }]}
+            onPress={async () => {
+              if (!confirmLeave) { setConfirmLeave(true); return; }
+              if (actioning || !user) return;
+              setActioning(true);
+              try {
+                await leaveGroup(thread.id, user.id);
+                setMenuVisible(false);
+                onModalChange?.(false);
+                showToast(`Left "${thread.name}"`);
+                onBack();
+              } catch {
+                showToast('Connection error — check your internet');
+              } finally {
+                setActioning(false);
+              }
+            }}
+            disabled={actioning}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="exit-outline" size={20} color={confirmLeave ? '#CC3333' : D.sheetName} />
+            <Text style={[styles.menuRowText, { color: confirmLeave ? '#CC3333' : D.sheetName }]}>
+              {confirmLeave ? 'Tap again to confirm leave' : 'Leave chat'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* End plan — creator only, only if linked to a plan */}
+          {isCreator && planId && (
             <TouchableOpacity
-              key={space.name}
-              style={styles.spaceSheetRow}
-              onPress={() => sendSpace(space)}
+              style={[styles.menuRow, styles.menuRowDanger, actioning && { opacity: 0.6 }]}
+              onPress={async () => {
+                if (!confirmEnd) { setConfirmEnd(true); return; }
+                if (actioning || !user) return;
+                setActioning(true);
+                try {
+                  await cancelPlan(planId);
+                  try { await sendSystemMessage(thread.id, user.id, '📢 The plan has been ended by the organiser.'); } catch { /* silent */ }
+                  setMenuVisible(false);
+                  onModalChange?.(false);
+                  showToast('Plan ended');
+                  onBack();
+                } catch {
+                  showToast('Connection error — check your internet');
+                } finally {
+                  setActioning(false);
+                }
+              }}
+              disabled={actioning}
               activeOpacity={0.85}
             >
-              <Text style={styles.spaceSheetName}>{space.name}</Text>
-              <View style={styles.spaceSheetRight}>
-                <View style={styles.spaceStatusPill}>
-                  <Text style={styles.spaceStatusText}>{space.status}</Text>
-                </View>
-                <Text style={styles.spaceWeather}>{space.weather}</Text>
-              </View>
+              <Ionicons name="close-circle-outline" size={20} color="#FFFFFF" />
+              <Text style={[styles.menuRowText, { color: '#FFFFFF' }]}>
+                {confirmEnd ? 'Tap again to confirm end' : 'End plan'}
+              </Text>
             </TouchableOpacity>
-          ))}
-          <View style={{ height: 24 }} />
+          )}
         </View>
+      </Modal>
+
+      {/* ── Add people modal ─────────────────────────────────────────────────── */}
+      <Modal
+        visible={addPeopleVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => { setAddPeopleVisible(false); onModalChange?.(false); }}
+      >
+        <TouchableWithoutFeedback onPress={() => { setAddPeopleVisible(false); onModalChange?.(false); }}>
+          <View style={styles.spaceSheetBackdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <View style={[styles.spaceSheet, { backgroundColor: D.sheetBg, borderColor: D.sheetBorder, maxHeight: '70%', paddingBottom: 0 }]}>
+          <View style={styles.sheetDragHandle} />
+          <Text style={[styles.spaceSheetTitle, { color: D.sheetTitle }]}>ADD PEOPLE</Text>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {addPeopleFriends.length === 0 && (
+              <ActivityIndicator color={Colors.navy} style={{ marginVertical: 24 }} />
+            )}
+            {addPeopleFriends.map((f: any) => {
+              const initials = f.avatar_initials ?? f.full_name?.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase() ?? '??';
+              const sel = addPeopleSelected.includes(f.id);
+              return (
+                <TouchableOpacity
+                  key={f.id}
+                  style={[styles.menuRow, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }]}
+                  onPress={() => setAddPeopleSelected(prev => prev.includes(f.id) ? prev.filter(x => x !== f.id) : [...prev, f.id])}
+                  activeOpacity={0.85}
+                >
+                  <Avatar initials={initials} size={32} uri={f.avatar_url} />
+                  <Text style={[styles.menuRowText, { color: D.sheetName, flex: 1 }]}>{f.full_name}</Text>
+                  {sel && <Ionicons name="checkmark-circle" size={20} color={Colors.navy} />}
+                </TouchableOpacity>
+              );
+            })}
+            <View style={{ height: 16 }} />
+          </ScrollView>
+          <TouchableOpacity
+            style={[styles.menuAddBtn, addingPeople && { opacity: 0.6 }]}
+            onPress={async () => {
+              if (addingPeople || !user || !addPeopleSelected.length) return;
+              setAddingPeople(true);
+              try {
+                await addMembersToGroup(thread.id, addPeopleSelected);
+                const names = addPeopleFriends
+                  .filter((f: any) => addPeopleSelected.includes(f.id))
+                  .map((f: any) => f.full_name?.split(' ')[0])
+                  .join(', ');
+                try { await sendSystemMessage(thread.id, user.id, `📢 ${names} ${addPeopleSelected.length === 1 ? 'was' : 'were'} added to the chat.`); } catch { /* silent */ }
+                showToast(`Added ${addPeopleSelected.length} person${addPeopleSelected.length > 1 ? 's' : ''} to the chat`);
+                setAddPeopleVisible(false);
+                onModalChange?.(false);
+              } catch {
+                showToast('Connection error — check your internet');
+              } finally {
+                setAddingPeople(false);
+              }
+            }}
+            disabled={addingPeople || addPeopleSelected.length === 0}
+            activeOpacity={0.85}
+          >
+            {addingPeople
+              ? <ActivityIndicator size="small" color="#FFFFFF" />
+              : <Text style={styles.menuAddBtnText}>ADD {addPeopleSelected.length > 0 ? `(${addPeopleSelected.length}) ` : ''}→</Text>
+            }
+          </TouchableOpacity>
+          <View style={{ height: 32 }} />
+        </View>
+      </Modal>
+
+      {/* ── Group info sheet ─────────────────────────────────────────────────── */}
+      <Modal
+        visible={groupInfoVisible}
+        transparent
+        animationType="none"
+        onRequestClose={closeGroupInfo}
+      >
+        <TouchableWithoutFeedback onPress={closeGroupInfo}>
+          <View style={styles.spaceSheetBackdrop} pointerEvents="box-only" />
+        </TouchableWithoutFeedback>
+        <TouchableWithoutFeedback onPress={() => {}}>
+          <Animated.View style={[styles.groupInfoSheet, { backgroundColor: D.sheetBg, borderColor: D.sheetBorder, transform: [{ translateY: infoSheetY }] }]}>
+            <View style={styles.sheetDragHandle} />
+
+            {/* Close button */}
+            <TouchableOpacity style={styles.groupInfoCloseBtn} onPress={closeGroupInfo} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="close" size={18} color={D.sheetTitle as string} />
+            </TouchableOpacity>
+
+            {/* Group name */}
+            <Text style={[styles.groupInfoName, { color: D.nameColor }]} numberOfLines={2}>{thread.name}</Text>
+            <Text style={[styles.groupInfoSub, { color: D.subColor }]}>{(thread as GroupThread).memberCount} members</Text>
+
+            <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+
+              {/* Linked plan */}
+              {groupThread?.planId && (
+                <View style={[styles.groupInfoSection, { borderColor: D.sheetRowBorder }]}>
+                  <Text style={[styles.groupInfoLabel, { color: D.sheetTitle }]}>LINKED PLAN</Text>
+                  {groupInfoPlan ? (
+                    <View style={[styles.groupInfoPlanCard, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }]}>
+                      <Text style={[styles.groupInfoPlanTitle, { color: D.sheetName }]}>{groupInfoPlan.title}</Text>
+                      <Text style={[styles.groupInfoPlanMeta, { color: D.subColor }]}>
+                        📍 {groupInfoPlan.location}
+                      </Text>
+                      {groupInfoPlan.emoji && (
+                        <Text style={[styles.groupInfoPlanMeta, { color: D.subColor }]}>
+                          {groupInfoPlan.emoji} {groupInfoPlan.temp}°C
+                        </Text>
+                      )}
+                    </View>
+                  ) : (
+                    <ActivityIndicator color={Colors.navy} style={{ marginVertical: 12 }} />
+                  )}
+                </View>
+              )}
+
+              {/* Members */}
+              <View style={[styles.groupInfoSection, { borderColor: D.sheetRowBorder }]}>
+                <Text style={[styles.groupInfoLabel, { color: D.sheetTitle }]}>MEMBERS</Text>
+                {groupInfoMembers.length === 0 ? (
+                  <ActivityIndicator color={Colors.navy} style={{ marginVertical: 12 }} />
+                ) : (
+                  groupInfoMembers.map(m => (
+                    <View key={m.id} style={[styles.groupInfoMemberRow, { backgroundColor: D.sheetRowBg, borderColor: D.sheetRowBorder }]}>
+                      <Avatar initials={m.initials} size={32} uri={m.avatarUrl} />
+                      <Text style={[styles.groupInfoMemberName, { color: D.sheetName }]}>{m.name}</Text>
+                    </View>
+                  ))
+                )}
+              </View>
+
+              {/* Media */}
+              <View style={[styles.groupInfoSection, { borderColor: D.sheetRowBorder }]}>
+                <Text style={[styles.groupInfoLabel, { color: D.sheetTitle }]}>MEDIA</Text>
+                <Text style={[styles.groupInfoNoMedia, { color: D.subColor }]}>No media shared yet</Text>
+              </View>
+
+              {/* Creator confirmation banner */}
+              {creatorLeaveConfirm && (
+                <View style={[styles.creatorConfirmBanner, { backgroundColor: D.sheetRowBg, borderColor: '#CC3333' }]}>
+                  <Text style={[styles.creatorConfirmText, { color: D.sheetName }]}>
+                    You created this plan. Leaving will not delete it for others.
+                  </Text>
+                  <View style={styles.creatorConfirmBtns}>
+                    <TouchableOpacity
+                      style={[styles.creatorCancelBtn, { borderColor: D.sheetRowBorder }]}
+                      onPress={() => setCreatorLeaveConfirm(false)}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={[styles.creatorCancelBtnText, { color: D.sheetName }]}>CANCEL</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.creatorConfirmBtn}
+                      onPress={handleLeaveGroup}
+                      disabled={leavingGroup}
+                      activeOpacity={0.85}
+                    >
+                      {leavingGroup
+                        ? <ActivityIndicator size="small" color="#FFFFFF" />
+                        : <Text style={styles.creatorConfirmBtnText}>CONFIRM LEAVE</Text>
+                      }
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              <View style={{ height: 16 }} />
+            </ScrollView>
+
+            {/* Leave group button */}
+            {!creatorLeaveConfirm && (
+              <TouchableOpacity
+                style={[styles.leaveGroupBtn, leavingGroup && { opacity: 0.6 }]}
+                onPress={handleLeaveGroup}
+                disabled={leavingGroup}
+                activeOpacity={0.85}
+              >
+                {leavingGroup
+                  ? <ActivityIndicator size="small" color="#CC3333" />
+                  : <Text style={styles.leaveGroupBtnText}>LEAVE GROUP</Text>
+                }
+              </TouchableOpacity>
+            )}
+
+            <View style={{ height: 32 }} />
+          </Animated.View>
+        </TouchableWithoutFeedback>
       </Modal>
     </View>
   );
@@ -682,7 +1171,7 @@ function DMRow({ dm, onPress }: { dm: DMThread; onPress: () => void }) {
   return (
     <TouchableOpacity style={styles.chatCard} onPress={onPress} activeOpacity={0.85}>
       <View style={styles.dmAvatarWrap}>
-        <Avatar initials={dm.initials} size={44} free={dm.online} />
+        <Avatar initials={dm.initials} size={44} free={dm.online} uri={dm.avatarUrl} />
         {dm.online && <View style={styles.onlineDot} />}
       </View>
       <View style={styles.chatCardContent}>
@@ -690,7 +1179,11 @@ function DMRow({ dm, onPress }: { dm: DMThread; onPress: () => void }) {
           <Text style={styles.chatCardName} numberOfLines={1}>{dm.name}</Text>
           <Text style={styles.chatCardTime}>{dm.lastTime}</Text>
         </View>
-        <Text style={[styles.chatCardPreview, dm.unread > 0 && styles.chatCardPreviewBold]} numberOfLines={1}>
+        <Text style={[
+          styles.chatCardPreview,
+          dm.unread > 0 && styles.chatCardPreviewBold,
+          dm.isNew && styles.chatCardPreviewNew,
+        ]} numberOfLines={1}>
           {dm.lastMsg}
         </Text>
       </View>
@@ -727,8 +1220,8 @@ function FriendSearch({ currentUserId }: { currentUserId: string }) {
     if (q.length < 2) { setResults([]); setLoading(false); return; }
     setLoading(true);
     debounceRef.current = setTimeout(async () => {
-      const res = await searchUsers(q);
-      setResults(res.filter(u => u.id !== currentUserId));
+      const res = await searchUsers(q, currentUserId);
+      setResults(res); // currentUserId already excluded at DB level
       setLoading(false);
     }, 400);
   };
@@ -750,7 +1243,7 @@ function FriendSearch({ currentUserId }: { currentUserId: string }) {
         <TextInput
           style={styles.searchInput}
           placeholder="Search people to add..."
-          placeholderTextColor={Colors.gray300}
+          placeholderTextColor="rgba(255,255,255,0.4)"
           value={query}
           onChangeText={handleQuery}
           autoCapitalize="none"
@@ -770,7 +1263,7 @@ function FriendSearch({ currentUserId }: { currentUserId: string }) {
       {isSearching && (
         <View style={styles.searchResults}>
           {loading ? (
-            <ActivityIndicator size="small" color={Colors.navy} style={styles.searchLoading} />
+            <ActivityIndicator size="small" color="#FFFFFF" style={styles.searchLoading} />
           ) : results.length === 0 ? (
             <Text style={styles.searchEmpty}>No users found</Text>
           ) : (
@@ -782,7 +1275,7 @@ function FriendSearch({ currentUserId }: { currentUserId: string }) {
                 u.full_name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
               return (
                 <View key={u.id} style={styles.searchResultRow}>
-                  <Avatar initials={initials} size={40} />
+                  <Avatar initials={initials} size={40} uri={u.avatar_url} />
                   <View style={styles.searchResultInfo}>
                     <Text style={styles.searchResultName}>{u.full_name}</Text>
                     <Text style={styles.searchResultEmail} numberOfLines={1}>{u.email}</Text>
@@ -848,7 +1341,7 @@ function FriendRequestsTab({
           (friend?.full_name ?? '??').split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
         return (
           <View key={req.id} style={styles.requestRow}>
-            <Avatar initials={initials} size={44} />
+            <Avatar initials={initials} size={44} uri={friend?.avatar_url} />
             <View style={styles.requestInfo}>
               <Text style={styles.requestName}>{friend?.full_name ?? 'Unknown User'}</Text>
               <Text style={styles.requestEmail} numberOfLines={1}>{friend?.email ?? ''}</Text>
@@ -906,46 +1399,97 @@ function FriendsView({ onBack }: { onBack: () => void }) {
   );
 }
 
+// ─── Sub-view tracking for swipe disable ─────────────────────────────────────
+export const chatNavRef = { inSubView: false };
+
 // ─── Chat screen ──────────────────────────────────────────────────────────────
-export default function ChatScreen() {
+export default function ChatScreen({ onModalChange }: { onModalChange?: (open: boolean) => void }) {
   const [_viewStack, _setViewStack] = useState<string[]>(['main']);
   const currentView = _viewStack[_viewStack.length - 1];
-  const pushView = (view: string) => _setViewStack(p => [...p, view]);
-  const popView = () => _setViewStack(p => (p.length > 1 ? p.slice(0, -1) : p));
+  const pushView = (view: string) => {
+    chatNavRef.inSubView = true;
+    if (view === 'thread') setChatBadge(0);
+    _setViewStack(p => [...p, view]);
+  };
+  const popView = () => {
+    _setViewStack(p => {
+      const next = p.length > 1 ? p.slice(0, -1) : p;
+      chatNavRef.inSubView = next.length > 1;
+      return next;
+    });
+  };
   const { user } = useAuth();
-  const [activeTab, setActiveTab]     = useState<'groups' | 'dms' | 'requests'>('groups');
-  const [dmConvos, setDmConvos]       = useState<DMThread[]>([]);
-  const [loadingDms, setLoadingDms]   = useState(false);
-  const [requests, setRequests]       = useState<any[]>([]);
-  const [acceptedIds, setAcceptedIds] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab]         = useState<'groups' | 'dms' | 'requests'>('groups');
+  const [dmConvos, setDmConvos]           = useState<DMThread[]>([]);
+  const [loadingDms, setLoadingDms]       = useState(false);
+  const [groupConvos, setGroupConvos]     = useState<GroupThread[]>([]);
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [requests, setRequests]           = useState<any[]>([]);
+  const [acceptedIds, setAcceptedIds]     = useState<Set<string>>(new Set());
   const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
+  const selectedThreadRef = useRef<Thread | null>(null);
+  useEffect(() => { selectedThreadRef.current = selectedThread; }, [selectedThread]);
 
-  // Load DM conversation list
+  const [chatBadge, setChatBadge] = useState(0);
+
+  // Subscribe to all incoming DMs for tab badge tracking
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToIncomingDMs(user.id, (msg) => {
+      // Only increment if the user isn't currently in that sender's thread
+      if (selectedThreadRef.current?.id !== msg.sender_id) {
+        setChatBadge(prev => prev + 1);
+      }
+    });
+    return unsub;
+  }, [user?.id]);
+
+  // Broadcast badge count to tab bar
+  useEffect(() => {
+    notifyChatUnreadCount(chatBadge);
+  }, [chatBadge]);
+
+  // Load DM conversation list — every friend appears, even with no messages yet
   const refetchDms = useCallback(async () => {
     if (!user) return;
     setLoadingDms(true);
     try {
       const [msgs, friends] = await Promise.all([getDMs(user.id), getFriends(user.id)]);
-      const friendMap = new Map(friends.map(f => [f.id, f]));
-      const seen = new Set<string>();
-      const threads: DMThread[] = [];
+
+      // Build a map: friendId → their last message (msgs are DESC by created_at)
+      const lastMsgByFriend = new Map<string, any>();
       for (const msg of msgs) {
         const otherId = msg.sender_id === user.id ? (msg as any).receiver_id : msg.sender_id;
-        if (!otherId || seen.has(otherId)) continue;
-        seen.add(otherId);
-        const friend = friendMap.get(otherId);
-        const senderData = msg.sender_id === otherId ? (msg as any).sender : null;
-        threads.push({
-          type: 'dm',
-          id: otherId,
-          name: friend?.full_name ?? senderData?.full_name ?? 'Unknown',
-          initials: friend?.avatar_initials ?? senderData?.avatar_initials ?? '??',
-          online: friend?.is_online ?? false,
-          lastMsg: (msg as any).content,
-          lastTime: formatTimestamp((msg as any).created_at),
-          unread: 0,
-        });
+        if (otherId && !lastMsgByFriend.has(otherId)) lastMsgByFriend.set(otherId, msg);
       }
+
+      // One thread per friend, regardless of whether they've messaged yet
+      const threads: DMThread[] = friends.map(friend => {
+        const last = lastMsgByFriend.get(friend.id);
+        const firstName = friend.full_name?.split(' ')[0] ?? 'there';
+        const initials = friend.avatar_initials ??
+          friend.full_name?.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase() ?? '??';
+        return {
+          type: 'dm',
+          id: friend.id,
+          name: friend.full_name ?? 'Unknown',
+          initials,
+          avatarUrl: friend.avatar_url ?? null,
+          online: friend.is_online ?? false,
+          lastMsg: last ? (last as any).content : `Say hi to ${firstName} 👋`,
+          lastTime: last ? formatTimestamp((last as any).created_at) : '',
+          unread: 0,
+          isNew: !last,
+        };
+      });
+
+      // Sort: threads with messages first (most recent), new friends at the bottom
+      threads.sort((a, b) => {
+        if (a.isNew && !b.isNew) return 1;
+        if (!a.isNew && b.isNew) return -1;
+        return 0;
+      });
+
       setDmConvos(threads);
     } catch {
       // silent
@@ -956,21 +1500,59 @@ export default function ChatScreen() {
 
   useEffect(() => { refetchDms(); }, [refetchDms]);
 
-  // Fetch incoming friend requests on mount, then every 30 seconds
+  const refetchGroups = useCallback(async () => {
+    if (!user) return;
+    setLoadingGroups(true);
+    try {
+      const raw = await getGroupsForUser(user.id);
+      setGroupConvos(raw.map(g => ({
+        type: 'group' as const,
+        id: g.id,
+        name: g.name,
+        memberCount: g.memberCount,
+        memberInitials: g.memberInitials,
+        lastMsg: g.lastMsg,
+        lastTime: formatTimestamp(g.lastTime),
+        unread: 0,
+        messages: [],
+        planId: g.planId ?? null,
+        planCreatorId: g.planCreatorId ?? null,
+      })));
+    } catch {
+      // silent
+    } finally {
+      setLoadingGroups(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    refetchGroups();
+    if (!user?.id) return;
+    // When a new group_members row arrives for this user, pull the updated group list
+    return subscribeToGroupMemberships(user.id, () => refetchGroups());
+  }, [refetchGroups]);
+
+  // Fetch incoming friend requests on mount + realtime subscription for instant updates
   useEffect(() => {
     if (!user) return;
-    const fetchReqs = () => {
-      getFriendRequests(user.id).then(data => setRequests((data ?? []) as any[]));
-    };
-    fetchReqs();
-    const interval = setInterval(fetchReqs, 30000);
-    return () => clearInterval(interval);
+    // Initial load
+    getFriendRequests(user.id).then(data => setRequests((data ?? []) as any[]));
+    // Realtime: new requests appear instantly without polling
+    const unsub = subscribeToFriendRequests(user.id, (req) => {
+      setRequests(prev => {
+        if (prev.some((r: any) => r.id === req.id)) return prev;
+        return [req as any, ...prev];
+      });
+    });
+    return unsub;
   }, [user?.id]);
 
   const handleAccept = async (id: string) => {
     try {
       await acceptFriendRequest(id);
       setAcceptedIds(prev => new Set([...prev, id]));
+      await refetchDms();
+      setActiveTab('dms');
     } catch {}
   };
 
@@ -981,8 +1563,25 @@ export default function ChatScreen() {
 
   const requestCount = requests.filter((r: any) => !acceptedIds.has(r.id)).length;
 
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([
+      refetchDms(),
+      refetchGroups(),
+      user ? getFriendRequests(user.id).then(data => setRequests((data ?? []) as any[])) : Promise.resolve(),
+    ]);
+    setRefreshing(false);
+  }, [refetchDms, refetchGroups, user?.id]);
+
   const [dark, setDarkMode] = useState(isDark());
   useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
+
+  // Register reset so tab bar can pop back to main list
+  useEffect(() => registerTabReset(3, () => {
+    chatNavRef.inSubView = false;
+    _setViewStack(['main']);
+  }), []);
 
   const bg = dark ? DarkTheme.bg : Colors.lightGrey;
   const surface = dark ? DarkTheme.surface : '#ECEEF3';
@@ -996,7 +1595,9 @@ export default function ChatScreen() {
     return (
       <ChatThread
         thread={selectedThread}
-        onBack={() => { popView(); refetchDms(); }}
+        onBack={() => { popView(); refetchDms(); refetchGroups(); }}
+        dark={dark}
+        onModalChange={onModalChange}
       />
     );
   }
@@ -1068,6 +1669,14 @@ export default function ChatScreen() {
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={dark ? '#FFFFFF' : '#001845'}
+            colors={['#001845']}
+          />
+        }
       >
         {activeTab === 'requests' ? (
           <>
@@ -1080,16 +1689,20 @@ export default function ChatScreen() {
             />
           </>
         ) : activeTab === 'groups' ? (
-          <View style={styles.emptyState}>
-            <Text style={[styles.emptyStateText, { color: textPrimary }]}>No group chats yet.</Text>
-            <TouchableOpacity
-              style={styles.emptyStateBtn}
-              onPress={() => showToast('Group creation coming soon!')}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.emptyStateBtnText}>Create Group</Text>
-            </TouchableOpacity>
-          </View>
+          loadingGroups ? (
+            <ActivityIndicator color={Colors.navy} style={{ marginTop: 40 }} />
+          ) : groupConvos.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={[styles.emptyStateText, { color: textPrimary }]}>No group chats yet.</Text>
+              <Text style={[styles.emptyStateHint, { color: textMuted }]}>
+                Create a plan with friends to start a group chat.
+              </Text>
+            </View>
+          ) : (
+            groupConvos.map(g => (
+              <GroupRow key={g.id} group={g} onPress={() => { setSelectedThread(g); pushView('thread'); }} />
+            ))
+          )
         ) : loadingDms ? (
           <ActivityIndicator color="#001845" style={{ marginTop: 40 }} />
         ) : dmConvos.length === 0 ? (
@@ -1111,6 +1724,7 @@ export default function ChatScreen() {
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
+
 const NAVY = '#001845';
 
 const styles = StyleSheet.create({
@@ -1286,6 +1900,10 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: Typography.weights.bold,
   },
+  chatCardPreviewNew: {
+    color: Colors.blueMuted,
+    fontStyle: 'italic',
+  },
 
   // DM avatar wrap
   dmAvatarWrap: { position: 'relative', flexShrink: 0 },
@@ -1382,17 +2000,17 @@ const styles = StyleSheet.create({
   },
 
   // Thread layout
-  thread: { flex: 1, backgroundColor: Colors.white },
+  thread: { flex: 1, backgroundColor: Colors.lightGrey },
   threadHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: Borders.widthHeavy,
-    borderBottomColor: Colors.black,
+    paddingTop: 14,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.gray100,
     backgroundColor: Colors.white,
     gap: 12,
-    ...Shadows.sm,
   },
   backArrow: {
     fontSize: 18,
@@ -1436,17 +2054,17 @@ const styles = StyleSheet.create({
 
   // Bubbles
   bubble: {
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusLg,
+    borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 10,
     backgroundColor: Colors.white,
-    ...Shadows.sm,
+  },
+  bubbleImage: {
+    paddingHorizontal: 6,
+    paddingVertical: 6,
   },
   bubbleMe: {
-    backgroundColor: Colors.navy,
-    borderColor: Colors.black,
+    backgroundColor: NAVY,
   },
   bubbleOther: {
     backgroundColor: Colors.white,
@@ -1465,6 +2083,12 @@ const styles = StyleSheet.create({
     fontWeight: Typography.weights.medium,
   },
   bubbleTimeMe: { color: Colors.blueMuted, textAlign: 'right' },
+  msgImage: {
+    width: 200,
+    height: 200,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
 
   // System message
   systemRow: {
@@ -1483,12 +2107,11 @@ const styles = StyleSheet.create({
   // Plan pill
   planPill: {
     backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 12,
     padding: 12,
     marginTop: 10,
-    ...Shadows.sm,
   },
   planPillTop: {
     flexDirection: 'row',
@@ -1514,10 +2137,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   planPillJoin: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    backgroundColor: NAVY,
+    borderRadius: 8,
     paddingVertical: 8,
     alignItems: 'center',
   },
@@ -1533,9 +2154,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.bluePale,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 12,
     padding: 12,
     marginTop: 10,
     gap: 10,
@@ -1557,13 +2176,10 @@ const styles = StyleSheet.create({
   // Invite card
   inviteCard: {
     backgroundColor: Colors.bluePale,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 2,
     maxWidth: 280,
-    ...Shadows.sm,
   },
   inviteCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   inviteCardLabel: { fontSize: 9, fontWeight: Typography.weights.black, letterSpacing: 2, color: Colors.navy },
@@ -1573,29 +2189,26 @@ const styles = StyleSheet.create({
   inviteBtnRow: { flexDirection: 'row', gap: 8 },
   inviteDeclineBtn: {
     flex: 1,
-    borderWidth: Borders.width, borderColor: Colors.black,
-    borderRadius: Borders.radiusSm, paddingVertical: 8, alignItems: 'center',
+    borderWidth: 1, borderColor: Colors.gray300,
+    borderRadius: 8, paddingVertical: 8, alignItems: 'center',
     backgroundColor: Colors.white,
   },
   inviteDeclineBtnText: { fontSize: 11, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.gray700 },
   inviteAcceptBtn: {
     flex: 2,
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy, borderColor: Colors.black,
-    borderRadius: Borders.radiusSm, paddingVertical: 8, alignItems: 'center',
-    ...Shadows.sm,
+    backgroundColor: NAVY,
+    borderRadius: 8, paddingVertical: 8, alignItems: 'center',
   },
   inviteAcceptBtnText: { fontSize: 11, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.white },
   inviteAccepted: {
     backgroundColor: Colors.greenLight,
-    borderWidth: Borders.width, borderColor: Colors.black,
-    borderRadius: Borders.radiusSm, paddingVertical: 8, alignItems: 'center',
+    borderWidth: 1, borderColor: Colors.green,
+    borderRadius: 8, paddingVertical: 8, alignItems: 'center',
   },
   inviteAcceptedText: { fontSize: 11, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.green },
   inviteDeclined: {
     backgroundColor: Colors.gray100,
-    borderWidth: Borders.width, borderColor: Colors.black,
-    borderRadius: Borders.radiusSm, paddingVertical: 8, alignItems: 'center',
+    borderRadius: 8, paddingVertical: 8, alignItems: 'center',
   },
   inviteDeclinedText: { fontSize: 11, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: Colors.gray500 },
 
@@ -1643,19 +2256,18 @@ const styles = StyleSheet.create({
   reactionBox: {
     flexDirection: 'row',
     backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusLg,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 20,
     paddingHorizontal: 8,
     paddingVertical: 10,
     gap: 4,
-    ...Shadows.md,
   },
   reactionEmojiBtn: {
     width: 52, height: 52,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: Borders.radius,
+    borderRadius: 10,
   },
   reactionEmoji: { fontSize: 28 },
 
@@ -1663,48 +2275,43 @@ const styles = StyleSheet.create({
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 20,
-    gap: 10,
-    borderTopWidth: Borders.widthHeavy,
-    borderTopColor: Colors.black,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: Colors.gray100,
     backgroundColor: Colors.white,
   },
   shareSpaceBtn: {
-    width: 44, height: 44,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    width: 40, height: 40,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Colors.bluePale,
+    backgroundColor: Colors.gray100,
     flexShrink: 0,
   },
   shareSpaceIcon: { fontSize: 18 },
   chatInput: {
     flex: 1,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: Typography.sizes.md,
     color: Colors.black,
     fontWeight: Typography.weights.medium,
     maxHeight: 100,
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.gray100,
   },
   sendBtn: {
     width: 44, height: 44,
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: NAVY,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
     flexShrink: 0,
-    ...Shadows.sm,
   },
   sendBtnDisabled: { opacity: 0.4 },
   sendArrow: {
@@ -1718,13 +2325,10 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 8,
     alignSelf: 'center',
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
+    backgroundColor: NAVY,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    ...Shadows.sm,
   },
   unreadIndicatorText: {
     fontSize: Typography.sizes.xs,
@@ -1744,12 +2348,12 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     backgroundColor: Colors.white,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    borderTopWidth: Borders.widthHeavy,
-    borderLeftWidth: Borders.widthHeavy,
-    borderRightWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: Colors.gray100,
     paddingHorizontal: 20,
     paddingTop: 20,
   },
@@ -1765,12 +2369,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 12,
     padding: 14,
     marginBottom: 10,
-    ...Shadows.sm,
   },
   spaceSheetName: {
     fontSize: Typography.sizes.md,
@@ -1784,9 +2387,7 @@ const styles = StyleSheet.create({
   },
   spaceStatusPill: {
     backgroundColor: Colors.bluePale,
-    borderWidth: 1.5,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    borderRadius: 8,
     paddingHorizontal: 7,
     paddingVertical: 3,
   },
@@ -1810,41 +2411,34 @@ const styles = StyleSheet.create({
   searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: '#002060',
+    borderWidth: 0,
+    borderRadius: 14,
     paddingHorizontal: 14,
     paddingVertical: 11,
     gap: 10,
-    ...Shadows.sm,
   },
   searchIcon: { fontSize: 16 },
   searchInput: {
     flex: 1,
     fontSize: Typography.sizes.sm,
     fontWeight: Typography.weights.medium,
-    color: Colors.black,
+    color: '#FFFFFF',
     padding: 0,
   },
   searchClear: {
     fontSize: 13,
-    color: Colors.gray500,
+    color: 'rgba(255,255,255,0.45)',
     fontWeight: Typography.weights.bold,
   },
   searchResults: {
-    backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
     marginTop: 8,
-    overflow: 'hidden',
-    ...Shadows.md,
+    gap: 6,
   },
   searchLoading: { paddingVertical: 24 },
   searchEmpty: {
     fontSize: Typography.sizes.sm,
-    color: Colors.gray500,
+    color: 'rgba(255,255,255,0.5)',
     fontWeight: Typography.weights.medium,
     textAlign: 'center',
     paddingVertical: 24,
@@ -1855,75 +2449,67 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderBottomWidth: 1.5,
-    borderBottomColor: Colors.gray100,
+    backgroundColor: '#002060',
+    borderRadius: 14,
     gap: 12,
   },
   searchResultInfo: { flex: 1 },
   searchResultName: {
     fontSize: Typography.sizes.sm,
     fontWeight: Typography.weights.black,
-    color: Colors.navy,
+    color: '#FFFFFF',
     marginBottom: 2,
   },
   searchResultEmail: {
     fontSize: 11,
-    color: Colors.gray500,
+    color: 'rgba(255,255,255,0.5)',
     fontWeight: Typography.weights.medium,
   },
   searchBadge: {
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 5,
     flexShrink: 0,
   },
   searchBadgeFriends: {
-    backgroundColor: Colors.greenLight,
-    borderColor: Colors.green,
+    backgroundColor: 'rgba(52,199,89,0.2)',
   },
   searchBadgeFriendsText: {
     fontSize: 10,
     fontWeight: Typography.weights.black,
     letterSpacing: 0.5,
-    color: Colors.green,
+    color: '#34C759',
   },
   searchBadgeSent: {
-    backgroundColor: Colors.accent,
-    borderColor: Colors.black,
+    backgroundColor: 'rgba(255,255,255,0.12)',
   },
   searchBadgeSentText: {
     fontSize: 10,
     fontWeight: Typography.weights.black,
     letterSpacing: 0.5,
-    color: Colors.navy,
+    color: 'rgba(255,255,255,0.7)',
   },
   searchBadgePending: {
-    backgroundColor: Colors.gray100,
-    borderColor: Colors.gray300,
+    backgroundColor: 'rgba(255,255,255,0.08)',
   },
   searchBadgePendingText: {
     fontSize: 10,
     fontWeight: Typography.weights.black,
     letterSpacing: 0.5,
-    color: Colors.gray500,
+    color: 'rgba(255,255,255,0.5)',
   },
   searchAddBtn: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
     flexShrink: 0,
-    ...Shadows.sm,
   },
   searchAddBtnText: {
     fontSize: 10,
     fontWeight: Typography.weights.black,
     letterSpacing: 1,
-    color: Colors.white,
+    color: '#001845',
   },
 
   // ── Requests tab badge ─────────────────────────────────────────────────────
@@ -1989,13 +2575,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.white,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 12,
     padding: 14,
     marginBottom: 10,
     gap: 12,
-    ...Shadows.sm,
   },
   requestInfo: { flex: 1 },
   requestName: {
@@ -2015,9 +2600,9 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   requestDeclineBtn: {
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    borderWidth: 1,
+    borderColor: Colors.gray300,
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
     backgroundColor: Colors.white,
@@ -2029,13 +2614,10 @@ const styles = StyleSheet.create({
     color: Colors.gray700,
   },
   requestAcceptBtn: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radiusSm,
+    backgroundColor: NAVY,
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
-    ...Shadows.sm,
   },
   requestAcceptBtnText: {
     fontSize: 10,
@@ -2045,9 +2627,9 @@ const styles = StyleSheet.create({
   },
   requestAcceptedBadge: {
     backgroundColor: Colors.greenLight,
-    borderWidth: Borders.width,
+    borderWidth: 1,
     borderColor: Colors.green,
-    borderRadius: Borders.radiusSm,
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
     flexShrink: 0,
@@ -2057,6 +2639,50 @@ const styles = StyleSheet.create({
     fontWeight: Typography.weights.black,
     letterSpacing: 0.5,
     color: Colors.green,
+  },
+
+  // ── Group chat menu ────────────────────────────────────────────────────────
+  sheetDragHandle: {
+    width: 40, height: 4,
+    borderRadius: 2,
+    backgroundColor: Colors.gray300,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+  },
+  menuRowDanger: {
+    backgroundColor: '#CC3333',
+    borderColor: '#CC3333',
+  },
+  menuRowText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+    flex: 1,
+  },
+  menuAddBtn: {
+    backgroundColor: NAVY,
+    borderRadius: 12,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginTop: 8,
+    marginHorizontal: 0,
+  },
+  menuAddBtnText: {
+    fontSize: 12,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1.5,
+    color: '#FFFFFF',
   },
 
   // ── Groups empty state ─────────────────────────────────────────────────────
@@ -2072,19 +2698,173 @@ const styles = StyleSheet.create({
     color: Colors.navy,
   },
   groupsCreateBtn: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: NAVY,
+    borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 28,
     alignItems: 'center',
-    ...Shadows.sm,
   },
   groupsCreateBtnText: {
     fontSize: Typography.sizes.xs,
     fontWeight: Typography.weights.black,
     letterSpacing: 2,
     color: Colors.white,
+  },
+
+  // ── Group info sheet ───────────────────────────────────────────────────────
+  groupInfoSheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    maxHeight: '85%',
+    backgroundColor: Colors.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: Colors.gray100,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+  },
+  groupInfoCloseBtn: {
+    position: 'absolute',
+    top: 20,
+    right: 20,
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupInfoName: {
+    fontSize: 22,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+    letterSpacing: -0.5,
+    marginTop: 8,
+    marginBottom: 4,
+    paddingRight: 36,
+  },
+  groupInfoSub: {
+    fontSize: Typography.sizes.xs,
+    color: Colors.gray500,
+    fontWeight: Typography.weights.medium,
+    marginBottom: 20,
+  },
+  groupInfoSection: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.gray100,
+    paddingBottom: 16,
+    marginBottom: 16,
+  },
+  groupInfoLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2.5,
+    color: Colors.gray500,
+    marginBottom: 10,
+  },
+  groupInfoPlanCard: {
+    backgroundColor: Colors.bluePale,
+    borderRadius: 12,
+    padding: 14,
+    gap: 4,
+  },
+  groupInfoPlanTitle: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+    letterSpacing: -0.3,
+    marginBottom: 2,
+  },
+  groupInfoPlanMeta: {
+    fontSize: Typography.sizes.xs,
+    color: Colors.gray500,
+    fontWeight: Typography.weights.medium,
+  },
+  groupInfoMemberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.gray100,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+  },
+  groupInfoMemberName: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.bold,
+    color: Colors.navy,
+    flex: 1,
+  },
+  groupInfoNoMedia: {
+    fontSize: Typography.sizes.sm,
+    color: Colors.gray500,
+    fontStyle: 'italic',
+    fontWeight: Typography.weights.medium,
+    paddingVertical: 8,
+  },
+  leaveGroupBtn: {
+    borderWidth: 1.5,
+    borderColor: '#CC3333',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  leaveGroupBtnText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1.5,
+    color: '#CC3333',
+  },
+  creatorConfirmBanner: {
+    borderWidth: 1.5,
+    borderColor: '#CC3333',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 4,
+    gap: 12,
+  },
+  creatorConfirmText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.medium,
+    color: Colors.navy,
+    lineHeight: 20,
+  },
+  creatorConfirmBtns: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  creatorCancelBtn: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: Colors.gray300,
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: Colors.white,
+  },
+  creatorCancelBtnText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1,
+    color: Colors.navy,
+  },
+  creatorConfirmBtn: {
+    flex: 2,
+    backgroundColor: '#CC3333',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  creatorConfirmBtnText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1,
+    color: '#FFFFFF',
   },
 });

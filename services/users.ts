@@ -63,8 +63,8 @@ export async function setOnlineStatus(userId: string, isOnline: boolean) {
       .from('users')
       .update({ is_online: isOnline })
       .eq('id', userId);
-  } catch {
-    // Silent — presence is best-effort
+  } catch (err: any) {
+    console.error('users.setOnlineStatus error:', err);
   }
 }
 
@@ -74,8 +74,8 @@ export async function updateHoursOutside(userId: string, hours: number) {
       .from('users')
       .update({ hours_outside: hours })
       .eq('id', userId);
-  } catch {
-    // Silent
+  } catch (err: any) {
+    console.error('users.updateHoursOutside error:', err);
   }
 }
 
@@ -86,20 +86,22 @@ export async function getPlanCount(userId: string): Promise<number> {
       .select('id', { count: 'exact', head: true })
       .eq('creator_id', userId);
     return count ?? 0;
-  } catch {
+  } catch (err: any) {
+    console.error('users.getPlanCount error:', err);
     return 0;
   }
 }
 
 export async function getFriendCount(userId: string): Promise<number> {
   try {
-    const { count } = await supabase
-      .from('friendships')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('status', 'accepted');
-    return count ?? 0;
-  } catch {
+    const [out, inc] = await Promise.all([
+      supabase.from('friendships').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'accepted'),
+      supabase.from('friendships').select('id', { count: 'exact', head: true }).eq('friend_id', userId).eq('status', 'accepted'),
+    ]);
+    // Each bidirectional friendship has two rows — avoid double-counting by summing then halving
+    return Math.round(((out.count ?? 0) + (inc.count ?? 0)) / 2);
+  } catch (err: any) {
+    console.error('users.getFriendCount error:', err);
     return 0;
   }
 }
@@ -114,7 +116,8 @@ export async function getAllBadges(): Promise<Badge[]> {
       .order('created_at', { ascending: true });
     if (error) throw error;
     return (data ?? []) as Badge[];
-  } catch {
+  } catch (err: any) {
+    console.error('users.getAllBadges error:', err);
     return [];
   }
 }
@@ -127,20 +130,21 @@ export async function getUserBadges(userId: string): Promise<UserBadge[]> {
       .eq('user_id', userId);
     if (error) throw error;
     return (data ?? []) as UserBadge[];
-  } catch {
+  } catch (err: any) {
+    console.error('users.getUserBadges error:', err);
     return [];
   }
 }
 
 export async function awardBadge(userId: string, badgeId: string) {
   try {
-    const { error } = await supabase
+    const { error } = await (supabase
       .from('user_badges')
-      .insert({ user_id: userId, badge_id: badgeId })
+      .insert({ user_id: userId, badge_id: badgeId }) as any)
       .onConflict(['user_id', 'badge_id']);
     if (error) throw error;
     showToast('Badge awarded!');
-  } catch (err) {
-    // ignore duplicate / permission errors silently in UI flows
+  } catch (err: any) {
+    console.error('users.awardBadge error:', err);
   }
 }

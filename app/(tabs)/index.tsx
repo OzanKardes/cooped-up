@@ -1,37 +1,31 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Animated,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Toast, ToastRef, setToastRef, showToast } from '../../components/Toast';
 import { CreatePlanModal, EXISTING_PLANS } from './plans';
-import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
+import { Colors, Typography, Shadows } from '../../constants/theme';
+
+const BG   = Colors.lightGrey;
+const NAVY = '#001845';
 import { useAuth } from '../../hooks/useAuth';
-import { getPlansForToday, formatPlanTime } from '../../services/plans';
+import { getPlansForToday, formatPlanTime, subscribeToTodayPlans } from '../../services/plans';
 import { getOnlineFriends } from '../../services/friends';
 import { setOnlineStatus } from '../../services/users';
 import type { User } from '../../types';
 import { getBookmarkedPlans, subscribe as subscribeBookmarks, type BookmarkedPlan } from '../../lib/suggestedStore';
 import { isDark, subscribe as subscribeTheme, DarkTheme } from '../../lib/themeStore';
+import WeatherModal from '../../components/WeatherModal';
+import { fetchFullForecast, type FullForecast, type HourlyItem } from '../../services/weather';
 
-const BG = Colors.lightGrey;
-const NAVY = '#001845';
 
 // ─── Hardcoded fallback data ───────────────────────────────────────────────────
-const WEATHER = {
+const WEATHER_FALLBACK = {
   temp: 18, condition: 'Partly Cloudy', feelsLike: 16,
   wind: 12, humidity: 58, score: 8,
 };
-
-const HOURLY_FORECAST = [
-  { hour: '12pm', temp: 18, score: 7 },
-  { hour: '1pm',  temp: 19, score: 8 },
-  { hour: '2pm',  temp: 20, score: 9 },
-  { hour: '3pm',  temp: 20, score: 9 },
-  { hour: '4pm',  temp: 17, score: 6 },
-  { hour: '5pm',  temp: 14, score: 3 },
-];
 
 const CAMPUS_SPACES = [
   { id: '1', title: "Queen's Lawn", status: 'BUSY',  tag: 'OUTDOOR' },
@@ -39,64 +33,139 @@ const CAMPUS_SPACES = [
   { id: '3', title: 'SAF Terrace',  status: 'EMPTY', tag: 'HIDDEN GEM' },
 ];
 
-// ─── Weather banner ────────────────────────────────────────────────────────────
-function WeatherBanner() {
-  const [expanded, setExpanded] = useState(false);
-  const anim = useRef(new Animated.Value(0)).current;
+// ─── Maps an hourly forecast item to a CreatePlanModal slot ID ────────────────
+function hourToSlotId(item: HourlyItem): string | null {
+  const { hourNum: h, dayOffset: d } = item;
+  if (d === 0) {
+    if (h >= 9  && h < 13) return 'now';
+    if (h >= 13 && h < 15) return 'afternoon';
+    if (h >= 15 && h < 18) return 'late';
+    if (h >= 18 && h < 22) return 'evening';
+  } else if (d === 1) {
+    if (h >= 7  && h < 13) return 'tmr_morning';
+    if (h >= 13 && h < 17) return 'tmr_afternoon';
+    if (h >= 17 && h < 21) return 'tmr_evening';
+  }
+  return null;
+}
 
-  const toggle = () => {
-    const next = !expanded;
-    setExpanded(next);
-    Animated.spring(anim, { toValue: next ? 1 : 0, useNativeDriver: false, damping: 22, stiffness: 160 }).start();
+// ─── Weather banner ────────────────────────────────────────────────────────────
+function WeatherBanner({
+  forecast, onPress, onTimePress,
+}: {
+  forecast: FullForecast | null;
+  onPress: () => void;
+  onTimePress: (slotId: string) => void;
+}) {
+  const [selIdx, setSelIdx] = useState<number | null>(null);
+
+  const cur = forecast?.current;
+  const temp      = cur ? cur.temp      : WEATHER_FALLBACK.temp;
+  const condition = cur ? cur.condition : WEATHER_FALLBACK.condition;
+  const score     = cur ? cur.score     : WEATHER_FALLBACK.score;
+  const wind      = cur ? cur.windspeed : WEATHER_FALLBACK.wind;
+  const humidity  = cur ? cur.humidity  : WEATHER_FALLBACK.humidity;
+  const feelsLike = cur ? cur.feelsLike : WEATHER_FALLBACK.feelsLike;
+  const hourly    = forecast?.hourly ?? [];
+  const selItem   = selIdx !== null ? hourly[selIdx] : null;
+
+  const handleHourPress = (item: HourlyItem, i: number) => {
+    const slotId = hourToSlotId(item);
+    if (!slotId) return;
+    setSelIdx(prev => prev === i ? null : i);
   };
 
-  const expandH = anim.interpolate({ inputRange: [0, 1], outputRange: [0, 200] });
+  const bestHourScore = Math.max(...hourly.filter(h => hourToSlotId(h) !== null).map(h => h.score), 0);
 
   return (
     <View style={styles.weatherCard}>
-      <TouchableOpacity onPress={toggle} activeOpacity={0.9}>
+      {/* Tappable header → opens full weather modal */}
+      <TouchableOpacity onPress={onPress} activeOpacity={0.9}>
         <View style={styles.weatherRow}>
           <View>
-            <Text style={styles.weatherTemp}>{WEATHER.temp}°C</Text>
-            <Text style={styles.weatherCond}>{WEATHER.condition}</Text>
+            <Text style={styles.weatherTemp}>{temp}°C</Text>
+            <Text style={styles.weatherCond}>{condition}</Text>
           </View>
           <View style={styles.weatherRight}>
             <View style={styles.scorePill}>
-              <Text style={styles.scoreText}>{WEATHER.score}/10</Text>
+              <Text style={styles.scoreText}>{score}/10</Text>
             </View>
-            <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color={Colors.blueMuted} style={{ marginTop: 4 }} />
+            <Ionicons name="chevron-forward" size={14} color={Colors.blueMuted} style={{ marginTop: 4 }} />
           </View>
         </View>
         <Text style={styles.weatherNudge}>
-          {WEATHER.score >= 7
+          {score >= 7
             ? 'Good conditions outside — make the most of it.'
             : 'Not ideal — warm spots available on campus.'}
         </Text>
         <View style={styles.weatherStats}>
-          <Text style={styles.weatherStat}>{WEATHER.wind} km/h wind</Text>
+          <Text style={styles.weatherStat}>{wind} km/h wind</Text>
           <Text style={styles.weatherStatDot}>·</Text>
-          <Text style={styles.weatherStat}>{WEATHER.humidity}% humidity</Text>
+          <Text style={styles.weatherStat}>{humidity}% humidity</Text>
           <Text style={styles.weatherStatDot}>·</Text>
-          <Text style={styles.weatherStat}>Feels {WEATHER.feelsLike}°C</Text>
+          <Text style={styles.weatherStat}>Feels {feelsLike}°C</Text>
         </View>
       </TouchableOpacity>
 
-      <Animated.View style={{ maxHeight: expandH, overflow: 'hidden' }}>
-        <View style={styles.forecastDivider} />
-        <Text style={styles.forecastLabel}>HOURLY FORECAST</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {HOURLY_FORECAST.map((h, i) => (
-            <View key={i} style={styles.forecastCol}>
-              <Text style={styles.forecastHour}>{h.hour}</Text>
-              <Text style={styles.forecastTemp}>{h.temp}°</Text>
-              <View style={styles.scoreBarTrack}>
-                <View style={[styles.scoreBarFill, { height: Math.round(h.score * 2.4) }]} />
+      {/* Scrollable hourly suggestion strip */}
+      {hourly.length > 0 && (
+        <>
+          <View style={styles.weatherDivider} />
+          <Text style={styles.weatherStripLabel}>TIMES TO PLAN</Text>
+          <FlatList
+            horizontal
+            data={hourly}
+            keyExtractor={(_, i) => String(i)}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.hourlyStrip}
+            nestedScrollEnabled={true}
+            renderItem={({ item, index }) => {
+              const slotId = hourToSlotId(item);
+              const isGood   = slotId !== null && bestHourScore >= 7 && item.score === bestHourScore;
+              const isSel    = selIdx === index;
+              const tappable = slotId !== null;
+              return (
+                <TouchableOpacity
+                  style={[styles.hourBox, isGood && styles.hourBoxGood, isSel && styles.hourBoxSel]}
+                  onPress={() => handleHourPress(item, index)}
+                  activeOpacity={tappable ? 0.75 : 1}
+                  disabled={!tappable}
+                >
+                  <Text style={[styles.hourLabel, (isGood || isSel) && styles.hourLabelGood]}>{item.hour}</Text>
+                  <Text style={styles.hourEmoji}>{item.emoji}</Text>
+                  <Text style={[styles.hourTemp, (isGood || isSel) && styles.hourTempGood]}>{item.temp}°</Text>
+                  {isGood && !isSel && <Text style={styles.hourPlanLabel}>BEST</Text>}
+                  {isSel            && <Text style={[styles.hourPlanLabel, { color: '#4CAF50' }]}>✓</Text>}
+                </TouchableOpacity>
+              );
+            }}
+          />
+
+          {/* Plan now panel — visible when any hour is selected */}
+          {selItem && hourToSlotId(selItem) && (
+            <TouchableOpacity
+              style={styles.planNowPanel}
+              onPress={() => {
+                const slotId = hourToSlotId(selItem);
+                if (slotId) { setSelIdx(null); onTimePress(slotId); }
+              }}
+              activeOpacity={0.85}
+            >
+              <View style={styles.planNowLeft}>
+                <Text style={styles.planNowEmoji}>{selItem.emoji}</Text>
+                <View>
+                  <Text style={styles.planNowTime}>{selItem.hour}</Text>
+                  <Text style={styles.planNowSub}>{selItem.temp}°C · score {selItem.score}/10</Text>
+                </View>
               </View>
-              <Text style={styles.forecastScore}>{h.score}</Text>
-            </View>
-          ))}
-        </ScrollView>
-      </Animated.View>
+              <View style={styles.planNowBtn}>
+                <Text style={styles.planNowBtnText}>Plan for this time</Text>
+                <Ionicons name="arrow-forward" size={13} color="#001845" />
+              </View>
+            </TouchableOpacity>
+          )}
+        </>
+      )}
     </View>
   );
 }
@@ -118,19 +187,34 @@ function SpaceRow({ title, status, tag, dark }: { title: string; status: string;
 }
 
 // ─── Home screen ──────────────────────────────────────────────────────────────
-export default function HomeScreen() {
+export interface HomeTourRefs {
+  weatherCard: React.RefObject<View>;
+  yourDay:     React.RefObject<View>;
+  makePlan:    React.RefObject<View>;
+}
+
+export default function HomeScreen({
+  onModalChange, homeTourRefs,
+}: {
+  onModalChange?: (open: boolean) => void;
+  homeTourRefs?: HomeTourRefs;
+}) {
   const [dark, setDarkMode] = useState(isDark());
   useEffect(() => subscribeTheme(() => setDarkMode(isDark())), []);
 
   const bg = dark ? DarkTheme.bg : BG;
   const surface = dark ? DarkTheme.surface : Colors.white;
-  const textPrimary = dark ? DarkTheme.text : Colors.navy;
+  const textPrimary = dark ? DarkTheme.text : NAVY;
   const textMuted = dark ? DarkTheme.textMuted : Colors.gray500;
 
   const { user, profile } = useAuth();
   const toastRef = useRef<ToastRef>(null);
 
+  const [fullForecast, setFullForecast] = useState<FullForecast | null>(null);
+  const [weatherModalVisible, setWeatherModalVisible] = useState(false);
+
   const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [planSlot, setPlanSlot] = useState<string | undefined>(undefined);
   const [notifOn, setNotifOn] = useState(true);
   const [dbTodayPlans, setDbTodayPlans] = useState<
     { id: string; title: string; location: string; time: string }[]
@@ -143,22 +227,38 @@ export default function HomeScreen() {
 
   useEffect(() => { setToastRef(toastRef); }, []);
 
+  useEffect(() => {
+    fetchFullForecast().then(setFullForecast).catch(() => {});
+  }, []);
+
   useEffect(() => subscribeBookmarks(() => setBookmarkedPlans(getBookmarkedPlans())), []);
+
+  const refetchTodayPlans = useCallback(async () => {
+    if (!user?.id) return;
+    const plans = await getPlansForToday(user.id);
+    setDbTodayPlans(plans.map(p => ({
+      id: p.id,
+      title: p.title,
+      location: p.location,
+      time: formatPlanTime(p.time),
+    })));
+    // Once DB data is available, drop the optimistic local entries
+    setUserCreatedPlans([]);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user) return;
     setOnlineStatus(user.id, true);
-    getPlansForToday(user.id).then(plans => {
-      setDbTodayPlans(plans.map(p => ({
-        id: p.id,
-        title: p.title,
-        location: p.location,
-        time: formatPlanTime(p.time),
-      })));
-    });
+    refetchTodayPlans();
     getOnlineFriends(user.id).then(setOnlineFriends);
     return () => { if (user) setOnlineStatus(user.id, false); };
-  }, [user?.id]);
+  }, [user?.id, refetchTodayPlans]);
+
+  // Realtime: refetch YOUR DAY when user is added to a plan or creates a new plan
+  useEffect(() => {
+    if (!user?.id) return;
+    return subscribeToTodayPlans(user.id, refetchTodayPlans);
+  }, [user?.id, refetchTodayPlans]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening';
@@ -169,19 +269,47 @@ export default function HomeScreen() {
     ? dbTodayPlans
     : hardcodedMyPlans.map(p => ({ id: p.id, title: p.title, location: p.location, time: p.time }));
   const seenIds = new Set(basePlans.map(p => p.id));
+  const seenTitles = new Set(basePlans.map(p => p.title));
   const allPlans = [
     ...basePlans,
-    ...userCreatedPlans,
-    ...bookmarkedPlans.filter(p => !seenIds.has(p.id)),
+    // only show optimistic entries that haven't been replaced by DB data yet
+    ...userCreatedPlans.filter(p => !seenIds.has(p.id) && !seenTitles.has(p.title)),
+    ...bookmarkedPlans.filter(p => !seenIds.has(p.id) && !seenTitles.has(p.title)),
   ];
+
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        refetchTodayPlans(),
+        user?.id ? getOnlineFriends(user.id).then(setOnlineFriends) : Promise.resolve(),
+        fetchFullForecast().then(setFullForecast).catch(() => {}),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refetchTodayPlans, user?.id]);
+
+  const anyModalOpen = weatherModalVisible || createModalVisible;
 
   return (
     <View style={[styles.root, { backgroundColor: bg }]}>
+      <View style={{ flex: 1 }} pointerEvents={anyModalOpen ? 'none' : 'auto'}>
       <SafeAreaView style={[styles.safe, { backgroundColor: bg }]} edges={['top']}>
         <ScrollView
           style={{ flex: 1 }}
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
+          nestedScrollEnabled={true}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={dark ? '#FFFFFF' : NAVY}
+              colors={[NAVY]}
+            />
+          }
         >
           {/* ── Header ── */}
           <View style={styles.header}>
@@ -203,7 +331,7 @@ export default function HomeScreen() {
           </View>
 
           {/* ── Your day card ── */}
-          <View style={styles.yourDayCard}>
+          <View ref={homeTourRefs?.yourDay} collapsable={false} style={styles.yourDayCard}>
             <Text style={styles.yourDayTitle}>Your day</Text>
             {allPlans.length > 0 ? (
               allPlans.slice(0, 4).map(plan => (
@@ -222,19 +350,30 @@ export default function HomeScreen() {
 
           {/* ── Make Plan card ── */}
           <TouchableOpacity
+            ref={homeTourRefs?.makePlan as any}
             style={styles.makePlanCard}
-            onPress={() => setCreateModalVisible(true)}
+            onPress={() => { setCreateModalVisible(true); onModalChange?.(true); }}
             activeOpacity={0.88}
           >
             <Text style={styles.makePlanText}>Make Plan</Text>
             <View style={styles.plusCircle}>
-              <Ionicons name="add" size={20} color={NAVY} />
+              <Ionicons name="add" size={20} color={Colors.navy} />
             </View>
           </TouchableOpacity>
 
           {/* ── Section: Weather ── */}
           <Text style={[styles.sectionLabel, { color: textMuted }]}>WEATHER</Text>
-          <WeatherBanner />
+          <View ref={homeTourRefs?.weatherCard} collapsable={false}>
+            <WeatherBanner
+              forecast={fullForecast}
+              onPress={() => { setWeatherModalVisible(true); onModalChange?.(true); }}
+              onTimePress={(slotId) => {
+                setPlanSlot(slotId);
+                setCreateModalVisible(true);
+                onModalChange?.(true);
+              }}
+            />
+          </View>
 
           {/* ── Section: Friends online ── */}
           <Text style={[styles.sectionLabel, { color: textMuted }]}>FRIENDS RIGHT NOW</Text>
@@ -279,11 +418,25 @@ export default function HomeScreen() {
           <View style={{ height: 24 }} />
         </ScrollView>
       </SafeAreaView>
+      </View>
 
       <CreatePlanModal
         visible={createModalVisible}
-        onClose={() => setCreateModalVisible(false)}
+        onClose={() => { setCreateModalVisible(false); setPlanSlot(undefined); onModalChange?.(false); }}
         onCreate={plan => setUserCreatedPlans(prev => [...prev, plan])}
+        initialValues={planSlot ? { slot: planSlot } : undefined}
+      />
+      <WeatherModal
+        visible={weatherModalVisible}
+        forecast={fullForecast}
+        onClose={() => { setWeatherModalVisible(false); onModalChange?.(false); }}
+        onPlanTime={(slotId) => {
+          setWeatherModalVisible(false);
+          onModalChange?.(false);
+          setPlanSlot(slotId);
+          setCreateModalVisible(true);
+          onModalChange?.(true);
+        }}
       />
       <Toast ref={toastRef} />
     </View>
@@ -321,12 +474,10 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     borderWidth: 1.5,
-    borderColor: Colors.gray300,
     backgroundColor: Colors.white,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 4,
-    ...Shadows.sm,
   },
 
   // Your day card
@@ -467,32 +618,114 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: Colors.blueMuted,
   },
-  forecastDivider: {
+
+  // Hourly suggestion strip
+  weatherDivider: {
     height: 1,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    marginTop: 14,
-    marginBottom: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    marginTop: 16,
+    marginBottom: 14,
   },
-  forecastLabel: {
+  weatherStripLabel: {
     fontSize: 9,
     fontWeight: Typography.weights.black,
     letterSpacing: 2,
-    color: Colors.blueMuted,
+    color: 'rgba(255,255,255,0.4)',
     marginBottom: 10,
   },
-  forecastCol: { alignItems: 'center', marginRight: 18, gap: 4 },
-  forecastHour: { fontSize: 10, color: Colors.blueMuted, fontWeight: Typography.weights.bold },
-  forecastTemp: { fontSize: 11, color: '#FFFFFF', fontWeight: Typography.weights.black },
-  scoreBarTrack: {
-    width: 16, height: 24,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 2,
-    justifyContent: 'flex-end',
-    overflow: 'hidden',
+  hourlyStrip: {
+    gap: 8,
+    paddingBottom: 4,
   },
-  scoreBarFill: { width: '100%', backgroundColor: Colors.bluePale, borderRadius: 2 },
-  forecastScore: { fontSize: 9, color: Colors.blueMuted, fontWeight: Typography.weights.bold },
+  hourBox: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    minWidth: 60,
+    gap: 3,
+  },
+  hourBoxGood: {
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  hourBoxSel: {
+    backgroundColor: 'rgba(76,175,80,0.22)',
+    borderColor: '#4CAF50',
+    borderWidth: 1.5,
+  },
+  hourLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.medium,
+    color: 'rgba(255,255,255,0.45)',
+  },
+  hourLabelGood: {
+    color: 'rgba(255,255,255,0.9)',
+    fontWeight: Typography.weights.black,
+  },
+  hourEmoji: {
+    fontSize: 18,
+    lineHeight: 22,
+  },
+  hourTemp: {
+    fontSize: 13,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.55)',
+  },
+  hourTempGood: {
+    color: '#FFFFFF',
+  },
+  hourPlanLabel: {
+    fontSize: 8,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1.5,
+    color: Colors.green,
+    marginTop: 2,
+  },
 
+  // Plan-now panel (appears when a good hour is selected)
+  planNowPanel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    padding: 12,
+    marginTop: 10,
+    gap: 10,
+  },
+  planNowLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  planNowEmoji: { fontSize: 22 },
+  planNowTime: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+  },
+  planNowSub: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.55)',
+    fontWeight: Typography.weights.medium,
+    marginTop: 1,
+  },
+  planNowBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    gap: 5,
+    flexShrink: 0,
+  },
+  planNowBtnText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    color: '#001845',
+  },
   // Friend rows
   friendRow: {
     flexDirection: 'row',
@@ -502,7 +735,6 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 14,
     marginBottom: 8,
-    ...Shadows.sm,
   },
   friendAvatar: {
     width: 44,
@@ -518,7 +750,7 @@ const styles = StyleSheet.create({
   friendInitials: {
     fontSize: 14,
     fontWeight: Typography.weights.black,
-    color: NAVY,
+    color: Colors.navy,
   },
   onlineDot: {
     position: 'absolute',
@@ -582,7 +814,6 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     overflow: 'hidden',
     marginBottom: 8,
-    ...Shadows.sm,
   },
   spaceDivider: {
     height: 1,

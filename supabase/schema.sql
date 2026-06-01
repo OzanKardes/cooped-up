@@ -309,6 +309,23 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
+-- ─── Badges ──────────────────────────────────────────────────────────────────
+create table public.badges (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade,
+  badge_id text not null,
+  unlocked_at timestamp with time zone default now(),
+  unique(user_id, badge_id)
+);
+
+alter table public.badges enable row level security;
+
+create policy "Users can view own badges"
+  on public.badges for select using (auth.uid() = user_id);
+
+create policy "Users can insert own badges"
+  on public.badges for insert with check (auth.uid() = user_id);
+
 -- ─── Migrations: run these in the Supabase dashboard SQL editor ──────────────
 -- Add columns if the table already existed before this change:
 --

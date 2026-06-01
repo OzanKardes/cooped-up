@@ -5,38 +5,26 @@ import {
   Modal, TouchableWithoutFeedback,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Colors, Typography, Borders, Shadows } from '../../constants/theme';
+import { Colors, Typography } from '../../constants/theme';
 import { signIn, signUp } from '../../lib/auth';
 import { updateProfile } from '../../services/users';
 import { Toast, ToastRef, setToastRef, showToast } from '../../components/Toast';
 
+const BG     = '#001233';
+const CARD   = '#002060';
+const BORDER = 'rgba(255,255,255,0.12)';
+const MUTED  = 'rgba(255,255,255,0.45)';
+const IMPERIAL = '#003087';
+
 // ─── Picker data ──────────────────────────────────────────────────────────────
 const DEGREES = [
-  'Aeronautics',
-  'Bioengineering',
-  'Biomedical Sciences',
-  'Biochemistry',
-  'Biology',
-  'Business',
-  'Chemical Engineering',
-  'Chemistry',
-  'Civil Engineering',
-  'Computing',
-  'Design Engineering',
-  'Earth Science & Engineering',
-  'Economics & Management',
-  'EFDS',
-  'Electrical & Electronic Engineering',
-  'Environmental Engineering',
-  'Geoscience',
-  'Joint Mathematics & Computing',
-  'Materials Science',
-  'Mathematics',
-  'Mechanical Engineering',
-  'Medicine',
-  'Neuroscience',
-  'Physics',
-  'Other',
+  'Aeronautics', 'Bioengineering', 'Biomedical Sciences', 'Biochemistry',
+  'Biology', 'Business', 'Chemical Engineering', 'Chemistry', 'Civil Engineering',
+  'Computing', 'Design Engineering', 'Earth Science & Engineering',
+  'Economics & Management', 'EFDS', 'Electrical & Electronic Engineering',
+  'Environmental Engineering', 'Geoscience', 'Joint Mathematics & Computing',
+  'Materials Science', 'Mathematics', 'Mechanical Engineering', 'Medicine',
+  'Neuroscience', 'Physics', 'Other',
 ];
 
 const YEARS = [
@@ -44,8 +32,8 @@ const YEARS = [
   'Masters', 'PhD', 'Exchange Student',
 ];
 
-// ─── Reusable input field ─────────────────────────────────────────────────────
-function BrutalInput({
+// ─── Input field ──────────────────────────────────────────────────────────────
+function NavyInput({
   label, placeholder, value, onChangeText, secureTextEntry = false,
   keyboardType, error,
 }: {
@@ -59,16 +47,16 @@ function BrutalInput({
 }) {
   const [focused, setFocused] = useState(false);
   return (
-    <View style={inputStyles.wrapper}>
-      <Text style={inputStyles.label}>{label}</Text>
+    <View style={ist.wrapper}>
+      <Text style={ist.label}>{label}</Text>
       <TextInput
         style={[
-          inputStyles.input,
-          focused && inputStyles.inputFocused,
-          !!error && inputStyles.inputError,
+          ist.input,
+          focused && ist.inputFocused,
+          !!error && ist.inputError,
         ]}
         placeholder={placeholder}
-        placeholderTextColor={Colors.gray300}
+        placeholderTextColor={MUTED}
         value={value}
         onChangeText={onChangeText}
         secureTextEntry={secureTextEntry}
@@ -77,13 +65,13 @@ function BrutalInput({
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
       />
-      {!!error && <Text style={inputStyles.errorText}>{error}</Text>}
+      {!!error && <Text style={ist.errorText}>{error}</Text>}
     </View>
   );
 }
 
 // ─── Dropdown picker ──────────────────────────────────────────────────────────
-function BrutalPicker({
+function NavyPicker({
   label, options, value, onSelect, error,
 }: {
   label: string;
@@ -94,48 +82,44 @@ function BrutalPicker({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <View style={inputStyles.wrapper}>
-      <Text style={inputStyles.label}>{label}</Text>
+    <View style={ist.wrapper}>
+      <Text style={ist.label}>{label}</Text>
       <TouchableOpacity
-        style={[pickerStyles.trigger, !!error && inputStyles.inputError]}
+        style={[pst.trigger, !!error && { borderColor: Colors.red }]}
         onPress={() => setOpen(true)}
         activeOpacity={0.85}
       >
-        <Text style={[pickerStyles.triggerText, !value && pickerStyles.triggerPlaceholder]}>
+        <Text style={[pst.triggerText, !value && { color: MUTED }]}>
           {value || 'Select...'}
         </Text>
-        <Text style={pickerStyles.chevron}>▾</Text>
+        <Text style={pst.chevron}>▾</Text>
       </TouchableOpacity>
-      {!!error && <Text style={inputStyles.errorText}>{error}</Text>}
+      {!!error && <Text style={ist.errorText}>{error}</Text>}
 
-      <Modal
-        visible={open}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setOpen(false)}
-      >
-        <View style={pickerStyles.modalContainer}>
+      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
+        <View style={pst.modalContainer}>
           <TouchableWithoutFeedback onPress={() => setOpen(false)}>
-            <View style={pickerStyles.backdrop} />
+            <View style={pst.backdrop} />
           </TouchableWithoutFeedback>
-          <View style={pickerStyles.sheet}>
-            <Text style={pickerStyles.sheetTitle}>{label}</Text>
-            <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator={false}>
+          <View style={pst.sheet}>
+            <View style={pst.sheetHandle} />
+            <Text style={pst.sheetTitle}>{label}</Text>
+            <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
               {options.map((opt, idx) => (
                 <TouchableOpacity
                   key={opt}
                   style={[
-                    pickerStyles.option,
-                    value === opt && pickerStyles.optionActive,
-                    idx === options.length - 1 && pickerStyles.optionLast,
+                    pst.option,
+                    value === opt && pst.optionActive,
+                    idx === options.length - 1 && pst.optionLast,
                   ]}
                   onPress={() => { onSelect(opt); setOpen(false); }}
                   activeOpacity={0.85}
                 >
-                  <Text style={[pickerStyles.optionText, value === opt && pickerStyles.optionTextActive]}>
+                  <Text style={[pst.optionText, value === opt && pst.optionTextActive]}>
                     {opt}
                   </Text>
-                  {value === opt && <Text style={pickerStyles.optionCheck}>✓</Text>}
+                  {value === opt && <Text style={pst.optionCheck}>✓</Text>}
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -146,34 +130,32 @@ function BrutalPicker({
   );
 }
 
-const inputStyles = StyleSheet.create({
-  wrapper: { marginBottom: 16 },
+// ─── Styles for inputs / picker ───────────────────────────────────────────────
+const ist = StyleSheet.create({
+  wrapper: { marginBottom: 14 },
   label: {
-    fontSize: Typography.sizes.xs,
+    fontSize: 11,
     fontWeight: Typography.weights.bold,
     letterSpacing: 1.5,
-    color: Colors.gray700,
-    marginBottom: 6,
+    color: MUTED,
+    marginBottom: 7,
   },
   input: {
-    backgroundColor: Colors.white,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: CARD,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: Typography.sizes.md,
-    color: Colors.black,
+    color: '#FFFFFF',
     fontWeight: Typography.weights.medium,
   },
   inputFocused: {
-    borderColor: Colors.blue,
-    backgroundColor: Colors.accent,
-    ...Shadows.sm,
+    borderColor: 'rgba(255,255,255,0.35)',
+    backgroundColor: '#002a7a',
   },
-  inputError: {
-    borderColor: Colors.red,
-  },
+  inputError: { borderColor: Colors.red },
   errorText: {
     fontSize: Typography.sizes.xs,
     color: Colors.red,
@@ -182,12 +164,12 @@ const inputStyles = StyleSheet.create({
   },
 });
 
-const pickerStyles = StyleSheet.create({
+const pst = StyleSheet.create({
   trigger: {
-    backgroundColor: Colors.white,
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: CARD,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 14,
     flexDirection: 'row',
@@ -197,87 +179,62 @@ const pickerStyles = StyleSheet.create({
   triggerText: {
     flex: 1,
     fontSize: Typography.sizes.md,
-    color: Colors.black,
+    color: '#FFFFFF',
     fontWeight: Typography.weights.medium,
   },
-  triggerPlaceholder: {
-    color: Colors.gray300,
-  },
-  chevron: {
-    fontSize: 14,
-    color: Colors.gray500,
-    fontWeight: Typography.weights.bold,
-    marginLeft: 8,
-  },
-  modalContainer: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-  },
+  chevron: { fontSize: 14, color: MUTED, marginLeft: 8 },
+  modalContainer: { flex: 1, justifyContent: 'flex-end' },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   sheet: {
-    backgroundColor: Colors.white,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    borderTopWidth: Borders.widthHeavy,
-    borderLeftWidth: Borders.widthHeavy,
-    borderRightWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    paddingTop: 20,
+    backgroundColor: '#001845',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 12,
     paddingBottom: 48,
-    ...Shadows.md,
+  },
+  sheetHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignSelf: 'center', marginBottom: 16,
   },
   sheetTitle: {
-    fontSize: Typography.sizes.xs,
+    fontSize: 11,
     fontWeight: Typography.weights.black,
-    letterSpacing: 3,
-    color: Colors.gray500,
+    letterSpacing: 2.5,
+    color: MUTED,
     paddingHorizontal: 20,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   option: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1.5,
-    borderBottomColor: Colors.gray100,
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.07)',
   },
-  optionLast: {
-    borderBottomWidth: 0,
-  },
-  optionActive: {
-    backgroundColor: Colors.navy,
-  },
+  optionLast: { borderBottomWidth: 0 },
+  optionActive: { backgroundColor: 'rgba(255,255,255,0.08)' },
   optionText: {
     flex: 1,
     fontSize: Typography.sizes.md,
-    color: Colors.black,
+    color: '#FFFFFF',
     fontWeight: Typography.weights.medium,
   },
-  optionTextActive: {
-    color: Colors.white,
-    fontWeight: Typography.weights.bold,
-  },
-  optionCheck: {
-    fontSize: Typography.sizes.md,
-    color: Colors.white,
-    fontWeight: Typography.weights.black,
-  },
+  optionTextActive: { fontWeight: Typography.weights.bold, color: '#FFFFFF' },
+  optionCheck: { fontSize: Typography.sizes.md, color: Colors.blue, fontWeight: Typography.weights.black },
 });
 
 // ─── Login screen ─────────────────────────────────────────────────────────────
 export default function LoginScreen() {
-  const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail]         = useState('');
-  const [password, setPassword]   = useState('');
-  const [firstName, setFirstName] = useState('');
-  const [surname, setSurname]     = useState('');
-  const [degree, setDegree]       = useState('');
-  const [year, setYear]         = useState('');
-  const [loading, setLoading]   = useState(false);
+  const [isLogin, setIsLogin]         = useState(true);
+  const [email, setEmail]             = useState('');
+  const [password, setPassword]       = useState('');
+  const [firstName, setFirstName]     = useState('');
+  const [surname, setSurname]         = useState('');
+  const [degree, setDegree]           = useState('');
+  const [year, setYear]               = useState('');
+  const [loading, setLoading]         = useState(false);
   const [emailError, setEmailError]   = useState('');
   const [degreeError, setDegreeError] = useState('');
   const [yearError, setYearError]     = useState('');
@@ -285,19 +242,13 @@ export default function LoginScreen() {
   const toastRef = useRef<ToastRef>(null);
   useEffect(() => { setToastRef(toastRef); }, []);
 
-  const clearErrors = () => {
-    setEmailError('');
-    setDegreeError('');
-    setYearError('');
-  };
+  const clearErrors = () => { setEmailError(''); setDegreeError(''); setYearError(''); };
 
   const validateEmail = (v: string): boolean => {
     if (!v.includes('@') || !v.includes('.')) {
-      setEmailError('Enter a valid email address');
-      return false;
+      setEmailError('Enter a valid email address'); return false;
     }
-    setEmailError('');
-    return true;
+    setEmailError(''); return true;
   };
 
   const handleSubmit = async () => {
@@ -309,7 +260,6 @@ export default function LoginScreen() {
       if (!degree)           { setDegreeError('Please select your degree'); return; }
       if (!year)             { setYearError('Please select your year of study'); return; }
     }
-
     setLoading(true);
     try {
       if (isLogin) {
@@ -317,21 +267,13 @@ export default function LoginScreen() {
       } else {
         const fullName       = `${firstName.trim()} ${surname.trim()}`;
         const avatarInitials = (firstName.trim()[0] ?? '').toUpperCase() +
-                               (surname.trim()[0] ?? '').toUpperCase();
+                               (surname.trim()[0]  ?? '').toUpperCase();
         await signUp(email.trim(), password, fullName, degree, year, avatarInitials);
-        // Sign in after creation so navigation fires regardless of email confirmation setting
-        const signInResult = await signIn(email.trim(), password);
-        // Ensure name + initials are in the users table (safety net if DB trigger omits them)
-        if (signInResult?.session?.user?.id) {
-          try {
-            await updateProfile(signInResult.session.user.id, {
-              full_name: fullName,
-              avatar_initials: avatarInitials,
-            });
-          } catch {}
+        const res = await signIn(email.trim(), password);
+        if (res?.session?.user?.id) {
+          try { await updateProfile(res.session.user.id, { full_name: fullName, avatar_initials: avatarInitials }); } catch {}
         }
       }
-      // _layout.tsx onAuthStateChange will navigate to /(tabs) automatically
     } catch (err: any) {
       showToast(err.message ?? 'Something went wrong');
     } finally {
@@ -341,131 +283,97 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Header */}
+          {/* ── Header ── */}
           <View style={styles.header}>
-            <View style={styles.logoBlock}>
-              <Text style={styles.logoText}>COOPED</Text>
-              <Text style={styles.logoSub}>UP</Text>
-            </View>
+            <Text style={styles.logoText}>COOPED <Text style={styles.logoAccent}>UP</Text></Text>
             <Text style={styles.tagline}>Imperial College London</Text>
           </View>
 
-          {/* Tab toggle — Login / Sign up */}
+          {/* ── Sign In / Sign Up pill toggle ── */}
           <View style={styles.toggle}>
-            <TouchableOpacity
-              style={[styles.toggleBtn, isLogin && styles.toggleBtnActive]}
-              onPress={() => { setIsLogin(true); clearErrors(); }}
-            >
-              <Text style={[styles.toggleText, isLogin && styles.toggleTextActive]}>
-                SIGN IN
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.toggleBtn, !isLogin && styles.toggleBtnActive]}
-              onPress={() => { setIsLogin(false); clearErrors(); }}
-            >
-              <Text style={[styles.toggleText, !isLogin && styles.toggleTextActive]}>
-                SIGN UP
-              </Text>
-            </TouchableOpacity>
+            {(['SIGN IN', 'SIGN UP'] as const).map((lbl, i) => {
+              const active = i === 0 ? isLogin : !isLogin;
+              return (
+                <TouchableOpacity
+                  key={lbl}
+                  style={[styles.toggleBtn, active && styles.toggleBtnActive]}
+                  onPress={() => { setIsLogin(i === 0); clearErrors(); }}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.toggleText, active && styles.toggleTextActive]}>{lbl}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
-          {/* Form */}
-          <View style={styles.form}>
-            {!isLogin && (
-              <>
-                <BrutalInput
-                  label="FIRST NAME(S)"
-                  placeholder="e.g. John"
-                  value={firstName}
-                  onChangeText={setFirstName}
-                />
-                <BrutalInput
-                  label="SURNAME"
-                  placeholder="e.g. Smith"
-                  value={surname}
-                  onChangeText={setSurname}
-                />
-                <BrutalPicker
-                  label="DEGREE"
-                  options={DEGREES}
-                  value={degree}
-                  onSelect={v => { setDegree(v); setDegreeError(''); }}
-                  error={degreeError}
-                />
-                <BrutalPicker
-                  label="YEAR OF STUDY"
-                  options={YEARS}
-                  value={year}
-                  onSelect={v => { setYear(v); setYearError(''); }}
-                  error={yearError}
-                />
-              </>
-            )}
-            <BrutalInput
-              label="IMPERIAL EMAIL"
-              placeholder="you@imperial.ac.uk"
-              value={email}
-              onChangeText={v => { setEmail(v); if (emailError) validateEmail(v); }}
-              keyboardType="email-address"
-              error={emailError}
-            />
-            <BrutalInput
-              label="PASSWORD"
-              placeholder="••••••••"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-            />
+          {/* ── Form ── */}
+          {!isLogin && (
+            <>
+              <NavyInput label="FIRST NAME(S)" placeholder="e.g. John"  value={firstName} onChangeText={setFirstName} />
+              <NavyInput label="SURNAME"        placeholder="e.g. Smith" value={surname}   onChangeText={setSurname} />
+              <NavyPicker label="DEGREE"        options={DEGREES} value={degree} onSelect={v => { setDegree(v); setDegreeError(''); }} error={degreeError} />
+              <NavyPicker label="YEAR OF STUDY" options={YEARS}   value={year}   onSelect={v => { setYear(v);   setYearError(''); }}   error={yearError} />
+            </>
+          )}
 
-            {isLogin && (
-              <TouchableOpacity style={styles.forgotRow}>
-                <Text style={styles.forgot}>forgot password?</Text>
-              </TouchableOpacity>
-            )}
+          <NavyInput
+            label="IMPERIAL EMAIL"
+            placeholder="you@imperial.ac.uk"
+            value={email}
+            onChangeText={v => { setEmail(v); if (emailError) validateEmail(v); }}
+            keyboardType="email-address"
+            error={emailError}
+          />
+          <NavyInput
+            label="PASSWORD"
+            placeholder="••••••••"
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry
+          />
 
-            {/* Submit */}
-            <TouchableOpacity
-              style={[styles.submitBtn, loading && styles.submitBtnLoading]}
-              onPress={handleSubmit}
-              activeOpacity={0.85}
-              disabled={loading}
-            >
-              {loading ? (
-                <ActivityIndicator color={Colors.white} size="small" />
-              ) : (
-                <Text style={styles.submitText}>
-                  {isLogin ? 'SIGN IN →' : 'CREATE ACCOUNT →'}
-                </Text>
-              )}
+          {isLogin && (
+            <TouchableOpacity style={styles.forgotRow}>
+              <Text style={styles.forgot}>forgot password?</Text>
             </TouchableOpacity>
+          )}
 
-            {/* Divider */}
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or</Text>
-              <View style={styles.dividerLine} />
-            </View>
+          {/* ── Submit ── */}
+          <TouchableOpacity
+            style={[styles.submitBtn, loading && { opacity: 0.7 }]}
+            onPress={handleSubmit}
+            activeOpacity={0.88}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#001233" size="small" />
+              : <Text style={styles.submitText}>{isLogin ? 'SIGN IN →' : 'CREATE ACCOUNT →'}</Text>
+            }
+          </TouchableOpacity>
 
-            {/* Imperial SSO hint */}
-            <TouchableOpacity
-              style={styles.ssoBtn}
-              onPress={() => showToast('Imperial SSO coming soon')}
-            >
-              <Text style={styles.ssoText}>CONTINUE WITH IMPERIAL SSO</Text>
-            </TouchableOpacity>
+          {/* ── Divider ── */}
+          <View style={styles.divider}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.dividerText}>or</Text>
+            <View style={styles.dividerLine} />
           </View>
 
-          {/* Switch mode */}
+          {/* ── SSO ── */}
+          <TouchableOpacity
+            style={styles.ssoBtn}
+            onPress={() => showToast('Imperial SSO coming soon')}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.ssoText}>CONTINUE WITH IMPERIAL SSO</Text>
+          </TouchableOpacity>
+
+          {/* ── Switch mode ── */}
           <View style={styles.switchRow}>
             <Text style={styles.switchText}>
               {isLogin ? "Don't have an account? " : 'Already have an account? '}
@@ -476,7 +384,6 @@ export default function LoginScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-
       <Toast ref={toastRef} />
     </SafeAreaView>
   );
@@ -484,142 +391,91 @@ export default function LoginScreen() {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: Colors.white,
-  },
-  scroll: {
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 40,
-  },
-  header: {
-    marginBottom: 32,
-  },
-  logoBlock: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 6,
-    marginBottom: 4,
-  },
+  safe: { flex: 1, backgroundColor: BG },
+  scroll: { paddingHorizontal: 24, paddingTop: 32, paddingBottom: 48 },
+
+  // Header
+  header: { marginBottom: 36 },
   logoText: {
-    fontSize: Typography.sizes.xxl,
+    fontSize: 38,
     fontWeight: Typography.weights.black,
-    color: Colors.navy,
+    color: '#FFFFFF',
     letterSpacing: -1,
+    marginBottom: 6,
   },
-  logoSub: {
-    fontSize: Typography.sizes.xxl,
-    fontWeight: Typography.weights.black,
-    color: Colors.blue,
-    letterSpacing: -1,
-  },
+  logoAccent: { color: Colors.blue },
   tagline: {
     fontSize: Typography.sizes.sm,
-    color: Colors.gray500,
+    color: MUTED,
     fontWeight: Typography.weights.medium,
     letterSpacing: 0.5,
   },
+
+  // Toggle pill
   toggle: {
     flexDirection: 'row',
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
+    backgroundColor: '#001845',
+    borderRadius: 14,
+    padding: 4,
     marginBottom: 28,
-    overflow: 'hidden',
   },
   toggleBtn: {
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 11,
     alignItems: 'center',
-    backgroundColor: 'transparent',
+    borderRadius: 10,
   },
-  toggleBtnActive: {
-    backgroundColor: Colors.navy,
-  },
+  toggleBtnActive: { backgroundColor: CARD },
   toggleText: {
     fontSize: Typography.sizes.xs,
     fontWeight: Typography.weights.bold,
-    letterSpacing: 2,
-    color: Colors.gray500,
+    letterSpacing: 1.5,
+    color: MUTED,
   },
-  toggleTextActive: {
-    color: Colors.white,
-  },
-  form: {
-    gap: 0,
-  },
-  forgotRow: {
-    alignSelf: 'flex-end',
-    marginBottom: 20,
-    marginTop: -8,
-  },
-  forgot: {
-    fontSize: Typography.sizes.sm,
-    color: Colors.blue,
-    fontWeight: Typography.weights.medium,
-  },
+  toggleTextActive: { color: '#FFFFFF' },
+
+  // Forgot
+  forgotRow: { alignSelf: 'flex-end', marginBottom: 20, marginTop: -6 },
+  forgot: { fontSize: Typography.sizes.sm, color: Colors.blue, fontWeight: Typography.weights.medium },
+
+  // Submit — white button, navy text (high contrast on dark bg)
   submitBtn: {
-    backgroundColor: Colors.navy,
-    borderWidth: Borders.widthHeavy,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
-    paddingVertical: 18,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingVertical: 17,
     alignItems: 'center',
     marginTop: 8,
-    ...Shadows.md,
-  },
-  submitBtnLoading: {
-    opacity: 0.7,
   },
   submitText: {
-    color: Colors.white,
+    color: '#001233',
     fontSize: Typography.sizes.md,
     fontWeight: Typography.weights.black,
-    letterSpacing: 2,
+    letterSpacing: 1.5,
   },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginVertical: 20,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1.5,
-    backgroundColor: Colors.gray100,
-  },
-  dividerText: {
-    fontSize: Typography.sizes.sm,
-    color: Colors.gray500,
-  },
+
+  // Divider
+  divider: { flexDirection: 'row', alignItems: 'center', gap: 12, marginVertical: 20 },
+  dividerLine: { flex: 1, height: 1, backgroundColor: BORDER },
+  dividerText: { fontSize: Typography.sizes.sm, color: MUTED },
+
+  // SSO
   ssoBtn: {
-    borderWidth: Borders.width,
-    borderColor: Colors.black,
-    borderRadius: Borders.radius,
-    paddingVertical: 16,
+    backgroundColor: CARD,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 14,
+    paddingVertical: 15,
     alignItems: 'center',
-    backgroundColor: Colors.accent,
-    ...Shadows.sm,
   },
   ssoText: {
-    fontSize: Typography.sizes.xs,
+    fontSize: 11,
     fontWeight: Typography.weights.bold,
     letterSpacing: 1.5,
-    color: Colors.navy,
+    color: 'rgba(255,255,255,0.7)',
   },
-  switchRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginTop: 24,
-  },
-  switchText: {
-    fontSize: Typography.sizes.sm,
-    color: Colors.gray500,
-  },
-  switchLink: {
-    fontSize: Typography.sizes.sm,
-    color: Colors.blue,
-    fontWeight: Typography.weights.bold,
-  },
+
+  // Switch row
+  switchRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 28 },
+  switchText: { fontSize: Typography.sizes.sm, color: MUTED },
+  switchLink: { fontSize: Typography.sizes.sm, color: Colors.blue, fontWeight: Typography.weights.bold },
 });
