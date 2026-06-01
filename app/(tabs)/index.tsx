@@ -21,6 +21,8 @@ import WeatherModal from '../../components/WeatherModal';
 import { fetchFullForecast, type FullForecast, type HourlyItem } from '../../services/weather';
 
 
+import { DE_TIMETABLE } from '../../lib/timetable';
+
 // ─── Hardcoded fallback data ───────────────────────────────────────────────────
 const WEATHER_FALLBACK = {
   temp: 18, condition: 'Partly Cloudy', feelsLike: 16,
@@ -264,6 +266,10 @@ export default function HomeScreen({
   const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening';
   const firstName = profile?.full_name?.split(' ')[0] ?? '';
 
+  const todayTimetable = DE_TIMETABLE
+    .filter(e => e.day === new Date().getDay())
+    .sort((a, b) => a.startHour - b.startHour);
+
   const hardcodedMyPlans = EXISTING_PLANS.filter(p => p.creator === 'You');
   const basePlans = dbTodayPlans.length > 0
     ? dbTodayPlans
@@ -333,17 +339,38 @@ export default function HomeScreen({
           {/* ── Your day card ── */}
           <View ref={homeTourRefs?.yourDay} collapsable={false} style={styles.yourDayCard}>
             <Text style={styles.yourDayTitle}>Your day</Text>
-            {allPlans.length > 0 ? (
-              allPlans.slice(0, 4).map(plan => (
-                <View key={plan.id} style={styles.planRow}>
-                  <Text style={styles.planTime}>{plan.time}</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.planTitle} numberOfLines={1}>{plan.title}</Text>
-                    <Text style={styles.planLocation} numberOfLines={1}>{plan.location}</Text>
-                  </View>
+
+            {/* Plans */}
+            {allPlans.slice(0, 4).map(plan => (
+              <View key={plan.id} style={styles.planRow}>
+                <Text style={styles.planTime}>{plan.time}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.planTitle} numberOfLines={1}>{plan.title}</Text>
+                  <Text style={styles.planLocation} numberOfLines={1}>{plan.location}</Text>
                 </View>
-              ))
-            ) : (
+              </View>
+            ))}
+
+            {/* Timetable events — gray outline, visually distinct from plans */}
+            {todayTimetable.map(event => (
+              <View key={event.id} style={styles.ttRow}>
+                <Text style={styles.ttRowTime}>
+                  {`${String(event.startHour).padStart(2, '0')}:00`}
+                </Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.ttRowTitle} numberOfLines={1}>{event.title}</Text>
+                  <Text style={styles.ttRowLoc} numberOfLines={1}>{event.location}</Text>
+                </View>
+                <View style={styles.ttRowTag}>
+                  <Text style={styles.ttRowTagText}>
+                    {event.title.includes('Tutorial') ? 'TUTORIAL' : 'LECTURE'}
+                  </Text>
+                </View>
+              </View>
+            ))}
+
+            {/* Empty state — only when both lists are empty */}
+            {allPlans.length === 0 && todayTimetable.length === 0 && (
               <Text style={styles.emptyDayText}>Nothing planned yet — add one below.</Text>
             )}
           </View>
@@ -447,7 +474,7 @@ export default function HomeScreen({
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   safe: { flex: 1, backgroundColor: BG },
-  scroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
+  scroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 120 },
 
   // Header
   header: {
@@ -849,5 +876,50 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: Typography.weights.black,
     letterSpacing: 1,
+  },
+
+  // Timetable inline rows (inside yourDayCard — gray outline to distinguish from plans)
+  ttRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
+  ttRowTime: {
+    fontSize: Typography.sizes.xs,
+    fontWeight: Typography.weights.bold,
+    color: 'rgba(255,255,255,0.38)',
+    width: 42,
+  },
+  ttRowTitle: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.bold,
+    color: 'rgba(255,255,255,0.68)',
+    marginBottom: 2,
+  },
+  ttRowLoc: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.38)',
+    fontWeight: Typography.weights.medium,
+  },
+  ttRowTag: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    flexShrink: 0,
+  },
+  ttRowTagText: {
+    fontSize: 7,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 0.5,
   },
 });

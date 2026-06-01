@@ -20,6 +20,7 @@ import { notifyPlanInviteCount } from '../../lib/planInviteStore';
 import { checkAndUnlockBadges } from '../../services/badges';
 import { notifyBadgeUnlocked } from '../../lib/badgeQueue';
 import { getPlanCount } from '../../services/users';
+import { getSlotConflicts } from '../../lib/timetable';
 
 const { width } = Dimensions.get('window');
 
@@ -801,6 +802,7 @@ export function CreatePlanModal({
                     const wx = slotWeather(slot.id);
                     const emoji = wx ? wx.emoji : slot.weather;
                     const temp  = wx ? wx.temp  : slot.temp;
+                    const conflicts = getSlotConflicts(slot.id);
                     return (
                       <TouchableOpacity
                         key={slot.id}
@@ -831,6 +833,13 @@ export function CreatePlanModal({
                             ))}
                             <Text style={[mst.slotCount, sel ? { color: 'rgba(255,255,255,0.75)' } : { color: mutedCol }]}>
                               {isNow ? `${onlineFriends.length} free now` : `${selectedFriendObjs.length} might join`}
+                            </Text>
+                          </View>
+                        )}
+                        {conflicts.length > 0 && (
+                          <View style={mst.conflictBadge}>
+                            <Text style={mst.conflictText}>
+                              {'⚠️  You have a class: ' + conflicts.map(c => c.title.split('–')[0].trim()).join(', ')}
                             </Text>
                           </View>
                         )}
@@ -2330,6 +2339,23 @@ const mst = StyleSheet.create({
     borderColor: Colors.white,
   },
   slotCount: { fontSize: 11, color: Colors.gray500, fontWeight: Typography.weights.medium, marginLeft: 4 },
+  conflictBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    backgroundColor: 'rgba(232, 160, 32, 0.12)',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(232, 160, 32, 0.4)',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  conflictText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.medium,
+    color: '#C47D00',
+    flex: 1,
+  },
 
   // Step 3 — location
   locCard: {
