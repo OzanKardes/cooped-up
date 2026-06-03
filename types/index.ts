@@ -11,6 +11,8 @@ export interface User {
   degree?: string | null;
   year_of_study?: string | null;
   avatar_url?: string | null;
+  current_location?: string | null;
+  location_updated_at?: string | null;
 }
 
 export interface Friendship {
@@ -83,7 +85,7 @@ export interface Message {
   group_id?: string | null;
   receiver_id?: string | null;
   content: string;
-  type: 'text' | 'plan' | 'location';
+  type: 'text' | 'plan' | 'location' | 'image';
   created_at: string;
   // joined
   sender?: User;

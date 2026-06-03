@@ -26,6 +26,11 @@ import {
   addMembersToGroup,
   sendSystemMessage,
   getGroupMembers,
+  addReaction as dbAddReaction,
+  removeReaction as dbRemoveReaction,
+  getReactionsForMessages,
+  subscribeToReactions,
+  uploadChatImage,
 } from '../../services/messages';
 import { cancelPlan, leavePlan, getPlanById } from '../../services/plans';
 import { notifyChatUnreadCount } from '../../lib/chatUnreadStore';
@@ -276,10 +281,12 @@ function InviteCard({
 }
 
 // ─── Reaction strip ───────────────────────────────────────────────────────────
+type ReactionEntry = { count: number; isMine: boolean };
+
 function ReactionStrip({
   reactions, msgId, onAdd, alignRight,
 }: {
-  reactions: Record<string, number>;
+  reactions: Record<string, ReactionEntry>;
   msgId: string;
   onAdd: (id: string, emoji: string) => void;
   alignRight: boolean;
@@ -288,13 +295,13 @@ function ReactionStrip({
   if (!entries.length) return null;
   return (
     <View style={[styles.reactionStrip, alignRight && { justifyContent: 'flex-end' }]}>
-      {entries.map(([emoji, count]) => (
+      {entries.map(([emoji, { count, isMine }]) => (
         <TouchableOpacity
           key={emoji}
-          style={styles.reactionPill}
+          style={[styles.reactionPill, isMine && styles.reactionPillMine]}
           onPress={() => onAdd(msgId, emoji)}
         >
-          <Text style={styles.reactionPillText}>{emoji} {count}</Text>
+          <Text style={[styles.reactionPillText, isMine && styles.reactionPillTextMine]}>{emoji} {count}</Text>
         </TouchableOpacity>
       ))}
     </View>
@@ -303,14 +310,15 @@ function ReactionStrip({
 
 // ─── Message row ──────────────────────────────────────────────────────────────
 function MessageRow({
-  msg, reactions, isGroup, onLongPress, onAddReaction, inviteStates, onInviteRespond, dark, senderAvatarUrl,
+  msg, reactions, isGroup, onLongPress, onAddReaction, onImagePress, inviteStates, onInviteRespond, dark, senderAvatarUrl,
 }: {
   msg: ChatMessage;
-  reactions: Record<string, Record<string, number>>;
+  reactions: Record<string, Record<string, ReactionEntry>>;
   isGroup: boolean;
   senderAvatarUrl?: string | null;
   onLongPress: (id: string) => void;
   onAddReaction: (id: string, emoji: string) => void;
+  onImagePress: (uri: string) => void;
   inviteStates: Record<string, 'accepted' | 'declined'>;
   onInviteRespond: (id: string, response: 'accepted' | 'declined') => void;
   dark: boolean;
@@ -350,7 +358,9 @@ function MessageRow({
           >
             <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther, msg.imageUri && styles.bubbleImage, bubbleDark, bubbleMeDark]}>
               {msg.imageUri && (
-                <Image source={{ uri: msg.imageUri }} style={styles.msgImage} resizeMode="cover" />
+                <TouchableOpacity onPress={() => onImagePress(msg.imageUri!)} activeOpacity={0.9}>
+                  <Image source={{ uri: msg.imageUri }} style={styles.msgImage} resizeMode="cover" />
+                </TouchableOpacity>
               )}
               {msg.text !== '' && (
                 <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe, dark && !isMe && { color: '#FFFFFF' }]}>
@@ -376,6 +386,30 @@ function MessageRow({
       </View>
     </View>
   );
+}
+
+// ─── Reaction helpers ─────────────────────────────────────────────────────────
+function buildReactionMap(
+  data: { messageId: string; emoji: string; count: number; userIds: string[] }[],
+  myUserId: string,
+): Record<string, Record<string, ReactionEntry>> {
+  const result: Record<string, Record<string, ReactionEntry>> = {};
+  for (const { messageId, emoji, count, userIds } of data) {
+    if (!result[messageId]) result[messageId] = {};
+    result[messageId][emoji] = { count, isMine: userIds.includes(myUserId) };
+  }
+  return result;
+}
+
+function mapMsgContent(content: string, type: string): { text: string; location?: LocationData; imageUri?: string } {
+  if (type === 'location') {
+    try {
+      const p = JSON.parse(content);
+      return { text: '', location: { name: p.spaceName, status: p.busyness, weather: p.weather } };
+    } catch { return { text: content }; }
+  }
+  if (type === 'image') return { text: '', imageUri: content };
+  return { text: content };
 }
 
 // ─── Chat thread ──────────────────────────────────────────────────────────────
@@ -405,9 +439,12 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [reactionTarget, setReactionTarget] = useState<string | null>(null);
-  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
+  const [reactions, setReactions] = useState<Record<string, Record<string, ReactionEntry>>>({});
   const [inviteStates, setInviteStates] = useState<Record<string, 'accepted' | 'declined'>>({});
   const [shareSpaceVisible, setShareSpaceVisible] = useState(false);
+  const [imageViewerUri, setImageViewerUri] = useState<string | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const messageIdsRef = useRef<string[]>([]);
   const [unreadCount, setUnreadCount] = useState(thread.unread);
 
   // Group info sheet
@@ -483,16 +520,32 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.8,
     });
-    if (!result.canceled && result.assets[0]) {
-      const uri = result.assets[0].uri;
-      setMessages(prev => [...prev, {
-        id: `m_${Date.now()}`,
-        sender: 'ME',
-        senderName: 'You',
-        text: '',
-        time: 'now',
-        imageUri: uri,
-      }]);
+    if (result.canceled || !result.assets[0]) return;
+    const uri = result.assets[0].uri;
+
+    if (!isRealThread || !user) {
+      // Hardcoded thread — show locally only
+      setMessages(prev => [...prev, { id: `m_${Date.now()}`, sender: 'ME', senderName: 'You', text: '', time: 'now', imageUri: uri }]);
+      return;
+    }
+
+    setUploadingImage(true);
+    try {
+      const publicUrl = await uploadChatImage(thread.id, uri);
+      const optId = `opt_${Date.now()}`;
+      setMessages(prev => [...prev, { id: optId, sender: 'ME', senderName: 'You', text: '', time: 'now', imageUri: publicUrl }]);
+      const { error } = isDM
+        ? await dbSendMessage(user.id, thread.id, publicUrl, 'image')
+        : await dbSendGroupMessage(user.id, thread.id, publicUrl, 'image');
+      if (error) {
+        setMessages(prev => prev.filter(m => m.id !== optId));
+        showToast('Failed to send image');
+      }
+    } catch (err: any) {
+      console.error('pickImage error:', err);
+      showToast('Failed to send image');
+    } finally {
+      setUploadingImage(false);
     }
   };
   const scrollRef = useRef<ScrollView>(null);
@@ -511,27 +564,47 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
   useEffect(() => {
     if (!isRealThread || !user) return;
     if (isDM) {
-      getMessages(user.id, thread.id).then(data => {
-        setMessages(data.map(msg => ({
-          id: msg.id,
-          sender: msg.sender_id === user.id ? 'ME' : (dm?.initials ?? '??'),
-          senderName: msg.sender_id === user.id ? 'You' : (dm?.name ?? 'User'),
-          text: msg.content,
-          time: formatTime(msg.created_at),
-        })));
+      getMessages(user.id, thread.id).then(async data => {
+        const mapped = data.map(msg => {
+          const { text, location, imageUri } = mapMsgContent(msg.content, msg.type);
+          return {
+            id: msg.id,
+            sender: msg.sender_id === user.id ? 'ME' : (dm?.initials ?? '??'),
+            senderName: msg.sender_id === user.id ? 'You' : (dm?.name ?? 'User'),
+            text, location, imageUri,
+            time: formatTime(msg.created_at),
+          };
+        });
+        setMessages(mapped);
+        const ids = mapped.map(m => m.id);
+        messageIdsRef.current = ids;
+        if (ids.length) {
+          const rxData = await getReactionsForMessages(ids);
+          setReactions(buildReactionMap(rxData, user.id));
+        }
         setLoadingMessages(false);
         setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
       });
     } else {
-      getGroupMessages(thread.id).then(data => {
-        setMessages(data.map(msg => ({
-          id: msg.id,
-          sender: msg.sender_id === user.id ? 'ME' : (msg.sender?.avatar_initials ?? msg.sender_id.slice(0, 2).toUpperCase()),
-          senderName: msg.sender_id === user.id ? 'You' : (msg.sender?.full_name?.split(' ')[0] ?? 'Member'),
-          text: msg.content,
-          time: formatTime(msg.created_at),
-          isSystem: msg.content.startsWith('📢 '),
-        })));
+      getGroupMessages(thread.id).then(async data => {
+        const mapped = data.map(msg => {
+          const { text, location, imageUri } = mapMsgContent(msg.content, msg.type);
+          return {
+            id: msg.id,
+            sender: msg.sender_id === user.id ? 'ME' : (msg.sender?.avatar_initials ?? msg.sender_id.slice(0, 2).toUpperCase()),
+            senderName: msg.sender_id === user.id ? 'You' : (msg.sender?.full_name?.split(' ')[0] ?? 'Member'),
+            text, location, imageUri,
+            time: formatTime(msg.created_at),
+            isSystem: msg.type === 'text' && msg.content.startsWith('📢 '),
+          };
+        });
+        setMessages(mapped);
+        const ids = mapped.map(m => m.id);
+        messageIdsRef.current = ids;
+        if (ids.length) {
+          const rxData = await getReactionsForMessages(ids);
+          setReactions(buildReactionMap(rxData, user.id));
+        }
         setLoadingMessages(false);
         setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
       });
@@ -546,57 +619,83 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
 
     if (isDM) {
       unsubscribe = subscribeToMessages(user.id, (msg: Message) => {
-        // Filter to messages only in this thread
         const isThisThread =
           (msg.sender_id === user.id && msg.receiver_id === thread.id) ||
           (msg.sender_id === thread.id && msg.receiver_id === user.id);
         if (!isThisThread) return;
-
-        // Own messages already shown optimistically — skip
         if (msg.sender_id === user.id) return;
 
-        // Show typing indicator, then reveal incoming message
         setIsTyping(true);
         setTimeout(() => {
           setIsTyping(false);
-          setMessages(prev => [...prev, {
-            id: msg.id,
-            sender: dm?.initials ?? '??',
-            senderName: dm?.name ?? 'User',
-            text: msg.content,
-            time: formatTime(msg.created_at),
-          }]);
+          const { text, location, imageUri } = mapMsgContent(msg.content, msg.type);
+          const entry = { id: msg.id, sender: dm?.initials ?? '??', senderName: dm?.name ?? 'User', text, location, imageUri, time: formatTime(msg.created_at) };
+          setMessages(prev => { messageIdsRef.current = [...messageIdsRef.current, msg.id]; return [...prev, entry]; });
         }, 1200);
       });
     } else {
       unsubscribe = subscribeToGroupMessages(thread.id, (msg: Message) => {
         if (msg.sender_id === user?.id) return;
-        setMessages(prev => [...prev, {
+        const { text, location, imageUri } = mapMsgContent(msg.content, msg.type);
+        const entry = {
           id: msg.id,
           sender: msg.sender_id.slice(0, 2).toUpperCase(),
           senderName: 'Member',
-          text: msg.content,
+          text, location, imageUri,
           time: formatTime(msg.created_at),
-          isSystem: msg.content.startsWith('📢 '),
-        }]);
+          isSystem: msg.type === 'text' && msg.content.startsWith('📢 '),
+        };
+        setMessages(prev => { messageIdsRef.current = [...messageIdsRef.current, msg.id]; return [...prev, entry]; });
       });
     }
 
     return () => { unsubscribe?.(); };
   }, [isRealThread, user?.id, thread.id, isDM]);
 
+  // Reaction subscription — refetch all thread reactions on any change
+  useEffect(() => {
+    if (!isRealThread || !user) return;
+    const unsub = subscribeToReactions(async () => {
+      const ids = messageIdsRef.current;
+      if (!ids.length) return;
+      const rxData = await getReactionsForMessages(ids);
+      setReactions(buildReactionMap(rxData, user.id));
+    });
+    return unsub;
+  }, [isRealThread, user?.id]);
+
   const respondToInvite = (msgId: string, response: 'accepted' | 'declined') => {
     setInviteStates(prev => ({ ...prev, [msgId]: response }));
   };
 
-  const addReaction = (msgId: string, emoji: string) => {
-    setReactions(prev => ({
-      ...prev,
-      [msgId]: {
-        ...(prev[msgId] ?? {}),
-        [emoji]: ((prev[msgId] ?? {})[emoji] ?? 0) + 1,
-      },
-    }));
+  const addReaction = async (msgId: string, emoji: string) => {
+    if (!user) return;
+    const isMine = reactions[msgId]?.[emoji]?.isMine ?? false;
+
+    // Optimistic update
+    setReactions(prev => {
+      const cur = { ...(prev[msgId] ?? {}) };
+      if (isMine) {
+        const newCount = (cur[emoji]?.count ?? 1) - 1;
+        if (newCount <= 0) { delete cur[emoji]; }
+        else cur[emoji] = { count: newCount, isMine: false };
+      } else {
+        cur[emoji] = { count: (cur[emoji]?.count ?? 0) + 1, isMine: true };
+      }
+      return { ...prev, [msgId]: cur };
+    });
+
+    if (isRealThread) {
+      try {
+        if (isMine) {
+          await dbRemoveReaction(msgId, user.id, emoji);
+        } else {
+          await dbAddReaction(msgId, user.id, emoji);
+        }
+      } catch {
+        showToast('Could not save reaction — check your connection');
+      }
+    }
   };
 
   const sendMessage = async (text?: string, loc?: LocationData) => {
@@ -630,10 +729,27 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
     }
   };
 
-  const sendSpace = (space: typeof CAMPUS_SPACES_SHARE[0]) => {
+  const sendSpace = async (space: typeof CAMPUS_SPACES_SHARE[0]) => {
     setShareSpaceVisible(false);
     onModalChange?.(false);
-    sendMessage('', { name: space.name, status: space.status, weather: space.weather });
+
+    const payload = JSON.stringify({ spaceName: space.name, busyness: space.status, weather: space.weather });
+    const optId = `opt_${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: optId, sender: 'ME', senderName: 'You', text: '',
+      time: 'now',
+      location: { name: space.name, status: space.status, weather: space.weather },
+    }]);
+
+    if (isRealThread && user) {
+      const { error } = isDM
+        ? await dbSendMessage(user.id, thread.id, payload, 'location')
+        : await dbSendGroupMessage(user.id, thread.id, payload, 'location');
+      if (error) {
+        setMessages(prev => prev.filter(m => m.id !== optId));
+        showToast('Failed to share space');
+      }
+    }
   };
 
   const headerSub = isDM
@@ -727,6 +843,7 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
                 isGroup={!isDM}
                 onLongPress={id => { setReactionTarget(id); onModalChange?.(true); }}
                 onAddReaction={addReaction}
+                onImagePress={uri => { setImageViewerUri(uri); onModalChange?.(true); }}
                 inviteStates={inviteStates}
                 onInviteRespond={respondToInvite}
                 dark={dark}
@@ -770,11 +887,14 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
             <Text style={styles.shareSpaceIcon}>📍</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.shareSpaceBtn, { backgroundColor: D.btnBg, borderColor: D.btnBorder }]}
+            style={[styles.shareSpaceBtn, { backgroundColor: D.btnBg, borderColor: D.btnBorder }, uploadingImage && { opacity: 0.5 }]}
             onPress={pickImage}
             activeOpacity={0.8}
+            disabled={uploadingImage}
           >
-            <Ionicons name="image-outline" size={20} color={D.backIcon} />
+            {uploadingImage
+              ? <ActivityIndicator size="small" color={D.backIcon} />
+              : <Ionicons name="image-outline" size={20} color={D.backIcon} />}
           </TouchableOpacity>
           <TextInput
             style={[styles.chatInput, { backgroundColor: D.inputBg, color: D.inputText, borderColor: D.inputBorder }]}
@@ -1016,6 +1136,32 @@ function ChatThread({ thread, onBack, dark, onModalChange }: { thread: Thread; o
             }
           </TouchableOpacity>
           <View style={{ height: 32 }} />
+        </View>
+      </Modal>
+
+      {/* ── Full-size image viewer ──────────────────────────────────────────── */}
+      <Modal
+        visible={!!imageViewerUri}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { setImageViewerUri(null); onModalChange?.(false); }}
+      >
+        <View style={styles.imageViewerOverlay}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            onPress={() => { setImageViewerUri(null); onModalChange?.(false); }}
+            activeOpacity={1}
+          />
+          {imageViewerUri && (
+            <Image source={{ uri: imageViewerUri }} style={styles.imageViewerImage} resizeMode="contain" />
+          )}
+          <TouchableOpacity
+            style={styles.imageViewerClose}
+            onPress={() => { setImageViewerUri(null); onModalChange?.(false); }}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Ionicons name="close" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
         </View>
       </Modal>
 
@@ -2241,10 +2387,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
+  reactionPillMine: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
   reactionPillText: {
     fontSize: 12,
     fontWeight: Typography.weights.bold,
     color: Colors.navy,
+  },
+  reactionPillTextMine: {
+    color: '#FFFFFF',
   },
 
   // Reaction picker overlay
@@ -2550,6 +2703,29 @@ const styles = StyleSheet.create({
     fontWeight: Typography.weights.medium,
     textAlign: 'center',
     lineHeight: 20,
+  },
+
+  // ── Full-size image viewer ─────────────────────────────────────────────────
+  imageViewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageViewerImage: {
+    width: '100%',
+    height: '80%',
+  },
+  imageViewerClose: {
+    position: 'absolute',
+    top: 52,
+    right: 20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // ── Chat thread loading ────────────────────────────────────────────────────

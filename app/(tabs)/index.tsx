@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, FlatList,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TouchableWithoutFeedback,
+  RefreshControl, FlatList, Animated, Easing,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Toast, ToastRef, setToastRef, showToast } from '../../components/Toast';
-import { CreatePlanModal, EXISTING_PLANS } from './plans';
+import { CreatePlanModal, PlanEditSheet, EXISTING_PLANS } from './plans';
+import { leavePlan } from '../../services/plans';
 import { Colors, Typography, Shadows } from '../../constants/theme';
 
 const BG   = Colors.lightGrey;
@@ -188,6 +190,163 @@ function SpaceRow({ title, status, tag, dark }: { title: string; status: string;
   );
 }
 
+// ─── Your Day Card — expandable with inline plan menu ────────────────────────
+
+const YD_ITEM_H  = 54;  // fixed height per row
+const YD_TITLE_H = 42;  // "Your day" title + marginBottom
+
+type DayItem =
+  | { kind: 'plan'; id: string; title: string; location: string; time: string }
+  | { kind: 'tt';   id: string; title: string; location: string; startHour: number; endHour: number };
+
+function buildDayItems(
+  plans: { id: string; title: string; location: string; time: string }[],
+  ttEvents: typeof DE_TIMETABLE,
+): DayItem[] {
+  const planHour = (t: string): number => {
+    const m = t.match(/(\d+)(?::(\d+))?\s*(am|pm)/i);
+    if (!m) return 99;
+    let h = parseInt(m[1]);
+    if (m[3].toLowerCase() === 'pm' && h !== 12) h += 12;
+    if (m[3].toLowerCase() === 'am' && h === 12) h = 0;
+    return h;
+  };
+  const p: DayItem[] = plans.map(pl => ({ kind: 'plan' as const, ...pl }));
+  const t: DayItem[] = ttEvents.map(e => ({ kind: 'tt' as const, id: e.id, title: e.title, location: e.location, startHour: e.startHour, endHour: e.endHour }));
+  return [...p, ...t].sort((a, b) => (a.kind === 'tt' ? a.startHour : planHour(a.time)) - (b.kind === 'tt' ? b.startHour : planHour(b.time)));
+}
+
+function YourDayCard({
+  plans, timetableEvents, yourDayRef, onEditPlan, onLeavePlan,
+}: {
+  plans: { id: string; title: string; location: string; time: string }[];
+  timetableEvents: typeof DE_TIMETABLE;
+  yourDayRef?: React.RefObject<View>;
+  onEditPlan: (plan: { id: string; title: string; location: string; time: string }) => void;
+  onLeavePlan: (planId: string) => void;
+}) {
+  const items   = buildDayItems(plans, timetableEvents);
+  const total   = items.length;
+  const colH    = total > 0 ? YD_ITEM_H : 28;
+  const expH    = Math.max(total * YD_ITEM_H, 28);
+  const itemsH  = useRef(new Animated.Value(colH)).current;
+  const [expanded,       setExpanded]       = useState(false);
+  const [openMenuId,     setOpenMenuId]     = useState<string | null>(null);
+  const [confirmLeaveId, setConfirmLeaveId] = useState<string | null>(null);
+
+  useEffect(() => {
+    itemsH.setValue(expanded ? Math.max(total * YD_ITEM_H, 28) : (total > 0 ? YD_ITEM_H : 28));
+  }, [total]);
+
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next) { setOpenMenuId(null); setConfirmLeaveId(null); }
+    Animated.timing(itemsH, {
+      toValue: next ? Math.max(total * YD_ITEM_H, 28) : (total > 0 ? YD_ITEM_H : 28),
+      duration: 250,
+      useNativeDriver: false,
+    }).start();
+  };
+
+  const openMenu  = (id: string) => { setOpenMenuId(p => p === id ? null : id); setConfirmLeaveId(null); };
+  const closeMenu = () => { setOpenMenuId(null); setConfirmLeaveId(null); };
+
+  // Dropdown top = card padding + title area + rows above + 1 row
+  const menuTop = (planId: string) => {
+    const idx = items.findIndex(i => i.id === planId);
+    return 22 + YD_TITLE_H + (idx + 1) * YD_ITEM_H;
+  };
+
+  return (
+    <View
+      ref={yourDayRef}
+      collapsable={false}
+      style={[styles.yourDayCard, openMenuId ? { zIndex: 10 } : null]}
+    >
+      <Text style={styles.yourDayTitle}>Your day</Text>
+
+      {/* Clipped items area — only shows first item when collapsed */}
+      <Animated.View style={{ height: itemsH, overflow: 'hidden' }}>
+        {total === 0 ? (
+          <Text style={styles.emptyDayText}>Nothing planned yet — add one below.</Text>
+        ) : items.map(item =>
+          item.kind === 'tt' ? (
+            <View key={item.id} style={styles.ydTtRow}>
+              <Text style={styles.ydTtTime}>{String(item.startHour).padStart(2, '0')}:00</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.ydTtTitle} numberOfLines={1}>{item.title}</Text>
+                <Text style={styles.ydTtLoc}   numberOfLines={1}>{item.location}</Text>
+              </View>
+              <View style={styles.ydTtTag}>
+                <Text style={styles.ydTtTagText}>{item.title.includes('Tutorial') ? 'TUTORIAL' : 'LECTURE'}</Text>
+              </View>
+            </View>
+          ) : (
+            <View key={item.id} style={styles.ydPlanRow}>
+              <Text style={styles.planTime}>{item.time}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.planTitle}    numberOfLines={1}>{item.title}</Text>
+                <Text style={styles.planLocation} numberOfLines={1}>{item.location}</Text>
+              </View>
+              <TouchableOpacity style={styles.ydMenuBtn} onPress={() => openMenu(item.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={styles.ydMenuBtnText}>⋮</Text>
+              </TouchableOpacity>
+            </View>
+          )
+        )}
+      </Animated.View>
+
+      {/* Expand / collapse footer */}
+      {total > 1 && (
+        <TouchableOpacity style={styles.ydFooter} onPress={toggle} activeOpacity={0.7}>
+          <Text style={styles.ydFooterText}>{expanded ? '▲ less' : `▼ ${total - 1} more`}</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Backdrop — absorbs taps outside the dropdown to close it */}
+      {openMenuId && (
+        <TouchableWithoutFeedback onPress={closeMenu}>
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'transparent' }]} />
+        </TouchableWithoutFeedback>
+      )}
+
+      {/* Dropdown menu */}
+      {openMenuId && !confirmLeaveId && (
+        <View style={[styles.ydDropdown, { top: menuTop(openMenuId) }]}>
+          <TouchableOpacity style={styles.ydDropdownItem} activeOpacity={0.85}
+            onPress={() => {
+              const plan = items.find(i => i.id === openMenuId);
+              if (plan?.kind === 'plan') { closeMenu(); onEditPlan(plan); }
+            }}>
+            <Text style={styles.ydDropdownText}>Edit</Text>
+          </TouchableOpacity>
+          <View style={styles.ydDropdownDivider} />
+          <TouchableOpacity style={styles.ydDropdownItem} activeOpacity={0.85}
+            onPress={() => setConfirmLeaveId(openMenuId)}>
+            <Text style={[styles.ydDropdownText, { color: Colors.red }]}>Leave plan</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Leave confirmation */}
+      {confirmLeaveId && (
+        <View style={[styles.ydDropdown, { top: menuTop(confirmLeaveId) }]}>
+          <Text style={styles.ydConfirmLabel}>Leave this plan?</Text>
+          <View style={styles.ydConfirmRow}>
+            <TouchableOpacity activeOpacity={0.85} onPress={() => { onLeavePlan(confirmLeaveId); closeMenu(); }}>
+              <Text style={styles.ydConfirmYes}>CONFIRM</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.85} onPress={closeMenu}>
+              <Text style={styles.ydConfirmNo}>CANCEL</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
 // ─── Home screen ──────────────────────────────────────────────────────────────
 export interface HomeTourRefs {
   weatherCard: React.RefObject<View>;
@@ -283,6 +442,31 @@ export default function HomeScreen({
     ...bookmarkedPlans.filter(p => !seenIds.has(p.id) && !seenTitles.has(p.title)),
   ];
 
+  const [editSheetPlan,    setEditSheetPlan]    = useState<any>(null);
+  const [editSheetVisible, setEditSheetVisible] = useState(false);
+
+  const handleLeavePlan = useCallback(async (planId: string) => {
+    if (!user) return;
+    try {
+      await leavePlan(planId, user.id);
+      setDbTodayPlans(prev => prev.filter(p => p.id !== planId));
+      setUserCreatedPlans(prev => prev.filter(p => p.id !== planId));
+      showToast('You left the plan');
+    } catch {
+      showToast('Could not leave plan — check your connection');
+    }
+  }, [user?.id]);
+
+  const handlePlanUpdated = useCallback((planId: string, updates: { title?: string; location?: string; time?: string }) => {
+    setDbTodayPlans(prev => prev.map(p => p.id === planId ? { ...p, ...updates } : p));
+    setUserCreatedPlans(prev => prev.map(p => p.id === planId ? { ...p, ...updates } : p));
+  }, []);
+
+  const handlePlanCancelled = useCallback((planId: string) => {
+    setDbTodayPlans(prev => prev.filter(p => p.id !== planId));
+    setUserCreatedPlans(prev => prev.filter(p => p.id !== planId));
+  }, []);
+
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -336,44 +520,18 @@ export default function HomeScreen({
             </TouchableOpacity>
           </View>
 
-          {/* ── Your day card ── */}
-          <View ref={homeTourRefs?.yourDay} collapsable={false} style={styles.yourDayCard}>
-            <Text style={styles.yourDayTitle}>Your day</Text>
-
-            {/* Plans */}
-            {allPlans.slice(0, 4).map(plan => (
-              <View key={plan.id} style={styles.planRow}>
-                <Text style={styles.planTime}>{plan.time}</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.planTitle} numberOfLines={1}>{plan.title}</Text>
-                  <Text style={styles.planLocation} numberOfLines={1}>{plan.location}</Text>
-                </View>
-              </View>
-            ))}
-
-            {/* Timetable events — gray outline, visually distinct from plans */}
-            {todayTimetable.map(event => (
-              <View key={event.id} style={styles.ttRow}>
-                <Text style={styles.ttRowTime}>
-                  {`${String(event.startHour).padStart(2, '0')}:00`}
-                </Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.ttRowTitle} numberOfLines={1}>{event.title}</Text>
-                  <Text style={styles.ttRowLoc} numberOfLines={1}>{event.location}</Text>
-                </View>
-                <View style={styles.ttRowTag}>
-                  <Text style={styles.ttRowTagText}>
-                    {event.title.includes('Tutorial') ? 'TUTORIAL' : 'LECTURE'}
-                  </Text>
-                </View>
-              </View>
-            ))}
-
-            {/* Empty state — only when both lists are empty */}
-            {allPlans.length === 0 && todayTimetable.length === 0 && (
-              <Text style={styles.emptyDayText}>Nothing planned yet — add one below.</Text>
-            )}
-          </View>
+          {/* ── Your day card (expandable) ── */}
+          <YourDayCard
+            plans={allPlans}
+            timetableEvents={todayTimetable}
+            yourDayRef={homeTourRefs?.yourDay}
+            onEditPlan={plan => {
+              setEditSheetPlan({ ...plan, dbId: plan.id });
+              setEditSheetVisible(true);
+              onModalChange?.(true);
+            }}
+            onLeavePlan={handleLeavePlan}
+          />
 
           {/* ── Make Plan card ── */}
           <TouchableOpacity
@@ -465,6 +623,16 @@ export default function HomeScreen({
           onModalChange?.(true);
         }}
       />
+      {editSheetPlan && (
+        <PlanEditSheet
+          plan={editSheetPlan}
+          visible={editSheetVisible}
+          onClose={() => { setEditSheetVisible(false); setEditSheetPlan(null); onModalChange?.(false); }}
+          userId={user?.id ?? ''}
+          onUpdated={handlePlanUpdated}
+          onCancelled={handlePlanCancelled}
+        />
+      )}
       <Toast ref={toastRef} />
     </View>
   );
@@ -513,7 +681,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 22,
     marginBottom: 12,
-    minHeight: 170,
   },
   yourDayTitle: {
     fontSize: 22,
@@ -878,8 +1045,26 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 
-  // Timetable inline rows (inside yourDayCard — gray outline to distinguish from plans)
-  ttRow: {
+  // ── Your Day expandable rows ──────────────────────────────────────────────────
+  ydPlanRow: {
+    height: YD_ITEM_H,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  ydMenuBtn: {
+    paddingHorizontal: 6,
+    flexShrink: 0,
+    alignSelf: 'center',
+  },
+  ydMenuBtnText: {
+    fontSize: 18,
+    color: 'rgba(255,255,255,0.55)',
+    fontWeight: Typography.weights.black,
+    lineHeight: 22,
+  },
+  ydTtRow: {
+    height: YD_ITEM_H,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
@@ -887,27 +1072,25 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.18)',
     borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 8,
   },
-  ttRowTime: {
+  ydTtTime: {
     fontSize: Typography.sizes.xs,
     fontWeight: Typography.weights.bold,
     color: 'rgba(255,255,255,0.38)',
     width: 42,
   },
-  ttRowTitle: {
+  ydTtTitle: {
     fontSize: Typography.sizes.sm,
     fontWeight: Typography.weights.bold,
     color: 'rgba(255,255,255,0.68)',
     marginBottom: 2,
   },
-  ttRowLoc: {
+  ydTtLoc: {
     fontSize: 10,
     color: 'rgba(255,255,255,0.38)',
     fontWeight: Typography.weights.medium,
   },
-  ttRowTag: {
+  ydTtTag: {
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 4,
     borderWidth: 1,
@@ -916,10 +1099,78 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     flexShrink: 0,
   },
-  ttRowTagText: {
+  ydTtTagText: {
     fontSize: 7,
     fontWeight: Typography.weights.black,
     color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 0.5,
+  },
+  ydFooter: {
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+  },
+  ydFooterText: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.45)',
+    fontWeight: Typography.weights.medium,
+  },
+
+  // ── Plan dropdown menu (absolutely positioned inside card) ────────────────────
+  ydDropdown: {
+    position: 'absolute',
+    right: 22,
+    backgroundColor: Colors.white,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#0D0D0D',
+    minWidth: 130,
+    shadowColor: '#0D0D0D',
+    shadowOffset: { width: 3, height: 3 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 8,
+    zIndex: 20,
+  },
+  ydDropdownItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  ydDropdownText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+  },
+  ydDropdownDivider: {
+    height: 1,
+    backgroundColor: Colors.gray100,
+    marginHorizontal: 4,
+  },
+  ydConfirmLabel: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  ydConfirmRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    gap: 16,
+  },
+  ydConfirmYes: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    color: Colors.red,
+    letterSpacing: 0.5,
+  },
+  ydConfirmNo: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    color: Colors.gray500,
     letterSpacing: 0.5,
   },
 });

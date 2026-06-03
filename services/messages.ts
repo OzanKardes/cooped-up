@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { Message } from '../types';
 import { showToast } from '../components/Toast';
+import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
 export async function getDMs(userId: string): Promise<Message[]> {
   try {
@@ -40,10 +41,11 @@ export async function sendMessage(
   senderId: string,
   receiverId: string,
   content: string,
+  type: 'text' | 'location' | 'image' = 'text',
 ): Promise<{ data: Message | null; error: any }> {
   const { data, error } = await supabase
     .from('messages')
-    .insert({ sender_id: senderId, receiver_id: receiverId, content, type: 'text' })
+    .insert({ sender_id: senderId, receiver_id: receiverId, content, type })
     .select('*, sender:users!messages_sender_id_fkey(*)')
     .single();
   if (error) {
@@ -71,10 +73,11 @@ export async function sendGroupMessage(
   senderId: string,
   groupId: string,
   content: string,
+  type: 'text' | 'location' | 'image' = 'text',
 ): Promise<{ data: Message | null; error: any }> {
   const { data, error } = await supabase
     .from('messages')
-    .insert({ sender_id: senderId, group_id: groupId, content, type: 'text' })
+    .insert({ sender_id: senderId, group_id: groupId, content, type })
     .select('*, sender:users!messages_sender_id_fkey(*)')
     .single();
   if (error) {
@@ -346,4 +349,94 @@ export function subscribeToGroupMessages(
     .subscribe();
 
   return () => { supabase.removeChannel(channel); };
+}
+
+// ─── Reactions ────────────────────────────────────────────────────────────────
+
+export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+  try {
+    const { error } = await (supabase.from('message_reactions') as any)
+      .upsert({ message_id: messageId, user_id: userId, emoji }, { onConflict: 'message_id,user_id,emoji', ignoreDuplicates: true });
+    if (error) throw error;
+  } catch (err: any) {
+    console.error('messages.addReaction error:', err);
+    throw err;
+  }
+}
+
+export async function removeReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('message_reactions')
+      .delete()
+      .eq('message_id', messageId)
+      .eq('user_id', userId)
+      .eq('emoji', emoji);
+    if (error) throw error;
+  } catch (err: any) {
+    console.error('messages.removeReaction error:', err);
+    throw err;
+  }
+}
+
+export async function getReactionsForMessages(messageIds: string[]): Promise<{
+  messageId: string; emoji: string; count: number; userIds: string[];
+}[]> {
+  if (!messageIds.length) return [];
+  try {
+    const { data, error } = await supabase
+      .from('message_reactions')
+      .select('message_id, emoji, user_id')
+      .in('message_id', messageIds);
+    if (error) throw error;
+
+    const grouped = new Map<string, { count: number; userIds: string[] }>();
+    for (const row of (data ?? []) as any[]) {
+      const key = `${row.message_id}::${row.emoji}`;
+      const entry = grouped.get(key) ?? { count: 0, userIds: [] };
+      entry.count++;
+      entry.userIds.push(row.user_id);
+      grouped.set(key, entry);
+    }
+
+    return [...grouped.entries()].map(([key, val]) => {
+      const sep = key.indexOf('::');
+      return { messageId: key.slice(0, sep), emoji: key.slice(sep + 2), count: val.count, userIds: val.userIds };
+    });
+  } catch (err: any) {
+    console.error('messages.getReactionsForMessages error:', err);
+    return [];
+  }
+}
+
+export function subscribeToReactions(callback: () => void): () => void {
+  const channel = supabase
+    .channel('message_reactions_global')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_reactions' }, callback)
+    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'message_reactions' }, callback)
+    .subscribe();
+  return () => { supabase.removeChannel(channel); };
+}
+
+// ─── Image upload ─────────────────────────────────────────────────────────────
+
+export async function uploadChatImage(threadId: string, uri: string): Promise<string> {
+  const key = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const path = `${threadId}/${key}.jpg`;
+
+  const base64 = await readAsStringAsync(uri, { encoding: EncodingType.Base64 });
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+  const { error } = await supabase.storage
+    .from('chat-media')
+    .upload(path, bytes, { upsert: false, contentType: 'image/jpeg' });
+  if (error) {
+    console.error('messages.uploadChatImage error:', error);
+    throw error;
+  }
+
+  const { data } = supabase.storage.from('chat-media').getPublicUrl(path);
+  return data.publicUrl;
 }

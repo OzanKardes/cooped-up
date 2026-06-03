@@ -25,11 +25,10 @@ export type TimetableEvent = typeof DE_TIMETABLE[0];
 // dayOffset is relative to today; startHour/endHour define the slot's time window.
 const SLOT_MAP: Record<string, { dayOffset: number; startHour: number; endHour: number }> = {
   now:           { dayOffset: 0, startHour: -1, endHour: -1 }, // resolved at call time
-  afternoon:     { dayOffset: 0, startHour: 13, endHour: 15 },
-  late:          { dayOffset: 0, startHour: 15, endHour: 18 },
-  evening:       { dayOffset: 0, startHour: 18, endHour: 22 },
-  tmr_morning:   { dayOffset: 1, startHour:  9, endHour: 13 },
-  tmr_afternoon: { dayOffset: 1, startHour: 13, endHour: 17 },
+  afternoon:     { dayOffset: 0, startHour: 12, endHour: 17 },
+  evening:       { dayOffset: 0, startHour: 17, endHour: 22 },
+  tmr_morning:   { dayOffset: 1, startHour:  8, endHour: 12 },
+  tmr_afternoon: { dayOffset: 1, startHour: 12, endHour: 17 },
   tmr_evening:   { dayOffset: 1, startHour: 17, endHour: 22 },
   thu:           { dayOffset: 2, startHour:  0, endHour: 24 },
   fri:           { dayOffset: 3, startHour:  0, endHour: 24 },

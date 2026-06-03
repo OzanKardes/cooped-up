@@ -136,6 +136,51 @@ export async function getUserBadges(userId: string): Promise<UserBadge[]> {
   }
 }
 
+// ─── Space / "I'm Here" location ──────────────────────────────────────────────
+
+export async function setUserLocation(userId: string, spaceId: string): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('users')
+      .update({ current_location: spaceId, location_updated_at: new Date().toISOString() })
+      .eq('id', userId);
+    if (error) throw error;
+  } catch (err: any) {
+    console.error('users.setUserLocation error:', err);
+    throw err;
+  }
+}
+
+export async function clearUserLocation(userId: string): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('users')
+      .update({ current_location: null, location_updated_at: null })
+      .eq('id', userId);
+    if (error) throw error;
+  } catch (err: any) {
+    console.error('users.clearUserLocation error:', err);
+    throw err;
+  }
+}
+
+export function subscribeToUserLocationChanges(
+  callback: (userId: string, location: string | null, updatedAt: string | null) => void,
+): () => void {
+  const channel = supabase
+    .channel('user_location_changes')
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'users' },
+      (payload) => {
+        const row = payload.new as any;
+        callback(row.id, row.current_location ?? null, row.location_updated_at ?? null);
+      },
+    )
+    .subscribe();
+  return () => { supabase.removeChannel(channel); };
+}
+
 export async function awardBadge(userId: string, badgeId: string) {
   try {
     const { error } = await (supabase

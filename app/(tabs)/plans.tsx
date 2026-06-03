@@ -95,18 +95,17 @@ const TIME_PERIODS = [
   {
     day: 'today', label: 'TODAY',
     slots: [
-      { id: 'now',       label: 'Now',           sub: 'Right now',       weather: '☀️', temp: 19 },
-      { id: 'afternoon', label: 'Afternoon',      sub: '1:00 – 3:00pm',  weather: '⛅', temp: 18 },
-      { id: 'late',      label: 'Late afternoon', sub: '3:00 – 5:00pm',  weather: '🌤', temp: 17 },
-      { id: 'evening',   label: 'Evening',        sub: 'From 6:00pm',    weather: '🌙', temp: 15 },
+      { id: 'now',       label: 'Now',       sub: 'Right now',      weather: '☀️', temp: 19 },
+      { id: 'afternoon', label: 'Afternoon', sub: '12:00 – 5:00pm', weather: '⛅', temp: 18 },
+      { id: 'evening',   label: 'Evening',   sub: 'From 5:00pm',    weather: '🌙', temp: 15 },
     ],
   },
   {
     day: 'tomorrow', label: 'TOMORROW',
     slots: [
-      { id: 'tmr_morning',   label: 'Morning',   sub: '9:00 – 12:00pm', weather: '🌧', temp: 14 },
-      { id: 'tmr_afternoon', label: 'Afternoon', sub: '1:00 – 4:00pm',  weather: '⛅', temp: 16 },
-      { id: 'tmr_evening',   label: 'Evening',   sub: 'From 5:00pm',    weather: '🌤', temp: 15 },
+      { id: 'tmr_morning',   label: 'Morning',   sub: '8:00am – 12:00pm', weather: '🌧', temp: 14 },
+      { id: 'tmr_afternoon', label: 'Afternoon', sub: '12:00 – 5:00pm',   weather: '⛅', temp: 16 },
+      { id: 'tmr_evening',   label: 'Evening',   sub: 'From 5:00pm',      weather: '🌤', temp: 15 },
     ],
   },
   {
@@ -170,12 +169,11 @@ function slotToISO(slotId: string): string {
   const now = new Date();
   const map: Record<string, [number, number, number]> = {
     now:           [0, now.getHours(), now.getMinutes()],
-    afternoon:     [0, 13, 0],
-    late:          [0, 15, 0],
-    evening:       [0, 18, 0],
-    tmr_morning:   [1,  9, 0],
-    tmr_afternoon: [1, 13, 0],
-    tmr_evening:   [1, 18, 0],
+    afternoon:     [0, 12, 0],
+    evening:       [0, 17, 0],
+    tmr_morning:   [1,  8, 0],
+    tmr_afternoon: [1, 12, 0],
+    tmr_evening:   [1, 17, 0],
     thu:           [2, 12, 0],
     fri:           [3, 12, 0],
     sat:           [4, 12, 0],
@@ -641,10 +639,13 @@ export function CreatePlanModal({
   const [selectedActivity, setSelectedActivity] = useState('');
   const [customActivityName, setCustomActivityName] = useState('');
   const [customActivityEmoji, setCustomActivityEmoji] = useState('✨');
+  const [customHour,   setCustomHour]   = useState(() => Math.min(23, new Date().getHours() + 1));
+  const [customMinute, setCustomMinute] = useState(0);
   const [createGroupChat, setCreateGroupChat] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  const CUSTOM_ID = '__custom__';
+  const CUSTOM_ID   = '__custom__';
+  const CUSTOM_SLOT = 'custom';
   const QUICK_EMOJIS = ['✨','🎉','🏃','🎨','🎵','🍕','🌳','📸','🏊','🎮','🛒','🎤','🌅','🎯','🏋️','🤸','🧘','🎲','🌮','🎪'];
 
   useEffect(() => {
@@ -654,6 +655,7 @@ export function CreatePlanModal({
       setSelectedSlot(initSlot); setSelectedDuration(60);
       setSelectedLocation(initialValues?.location ?? ''); setSelectedActivity('');
       setCustomActivityName(''); setCustomActivityEmoji('✨');
+      setCustomHour(Math.min(23, new Date().getHours() + 1)); setCustomMinute(0);
       setCreateGroupChat(true); setCreating(false);
       if (initSlot.startsWith('tmr_')) setSelectedDay('tomorrow');
       else if (['thu','fri','sat','sun'].includes(initSlot)) setSelectedDay('week');
@@ -675,16 +677,40 @@ export function CreatePlanModal({
     : step === 4 ? (!!selectedActivity && (selectedActivity !== CUSTOM_ID || customActivityName.trim() !== ''))
     : true;
 
+  // Helper: format a time label for the custom slot
+  const fmtCustomLabel = () => {
+    const h12 = customHour === 0 ? 12 : customHour > 12 ? customHour - 12 : customHour;
+    const ampm = customHour < 12 ? 'am' : 'pm';
+    const minStr = customMinute < 10 ? `0${customMinute}` : `${customMinute}`;
+    return `Custom  ·  ${h12}:${minStr} ${ampm}`;
+  };
+
   const handleCreate = async () => {
     if (creating) return;
     const savedFriends = [...selectedFriends];
-    const slotISO = slotToISO(selectedSlot || 'afternoon');
-    const slotLabel = selectedSlot ? slotDisplayLabel(selectedSlot) : 'Afternoon  ·  1:00 – 3:00pm';
-    const fallbackSlot = TIME_PERIODS.flatMap(p => p.slots).find(s => s.id === selectedSlot);
-    const wx = slotWeather(selectedSlot || 'afternoon');
-    const weatherEmoji = wx ? wx.emoji : (fallbackSlot?.weather ?? '⛅');
-    const weatherTemp  = wx ? wx.temp  : (fallbackSlot?.temp  ?? 18);
-    const weatherStr   = `${weatherEmoji} ${weatherTemp}°C`;
+
+    let slotISO: string;
+    let slotLabel: string;
+    let weatherEmoji: string;
+    let weatherTemp: number;
+
+    if (selectedSlot === CUSTOM_SLOT) {
+      const d = new Date();
+      if (selectedDay === 'tomorrow') d.setDate(d.getDate() + 1);
+      else if (selectedDay === 'week') d.setDate(d.getDate() + 2); // thu fallback
+      d.setHours(customHour, customMinute, 0, 0);
+      slotISO   = d.toISOString();
+      slotLabel = fmtCustomLabel();
+      weatherEmoji = '⛅'; weatherTemp = 18;
+    } else {
+      slotISO = slotToISO(selectedSlot || 'afternoon');
+      slotLabel = selectedSlot ? slotDisplayLabel(selectedSlot) : 'Afternoon  ·  12:00 – 5:00pm';
+      const fallbackSlot = TIME_PERIODS.flatMap(p => p.slots).find(s => s.id === selectedSlot);
+      const wx = slotWeather(selectedSlot || 'afternoon');
+      weatherEmoji = wx ? wx.emoji : (fallbackSlot?.weather ?? '⛅');
+      weatherTemp  = wx ? wx.temp  : (fallbackSlot?.temp  ?? 18);
+    }
+    const weatherStr = `${weatherEmoji} ${weatherTemp}°C`;
 
     const localPlan = { id: `u_${Date.now()}`, title: autoTitle, location: selectedLocation, time: slotLabel, weather: weatherStr };
     onClose();
@@ -847,6 +873,79 @@ export function CreatePlanModal({
                     );
                   })}
 
+                  {/* Custom time card */}
+                  {(() => {
+                    const isSel = selectedSlot === CUSTOM_SLOT;
+                    const h12   = customHour === 0 ? 12 : customHour > 12 ? customHour - 12 : customHour;
+                    const ampm  = customHour < 12 ? 'am' : 'pm';
+                    const minS  = customMinute < 10 ? `0${customMinute}` : `${customMinute}`;
+                    return (
+                      <TouchableOpacity
+                        style={[mst.slotCard, isSel && mst.slotCardSel, !isSel && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                        onPress={() => setSelectedSlot(CUSTOM_SLOT)}
+                        activeOpacity={0.85}
+                      >
+                        <View style={mst.slotTop}>
+                          <View>
+                            <Text style={[mst.slotLabel, isSel ? mst.slotLabelSel : { color: textCol }]}>Custom time</Text>
+                            <Text style={[mst.slotSub, isSel ? mst.slotSubSel : { color: mutedCol }]}>
+                              {isSel ? `${h12}:${minS} ${ampm}` : 'Pick a specific time'}
+                            </Text>
+                          </View>
+                          <Ionicons name="time-outline" size={22} color={isSel ? 'rgba(255,255,255,0.85)' : mutedCol} />
+                        </View>
+
+                        {isSel && (
+                          <View style={mst.customTimePicker}>
+                            {/* Hour */}
+                            <View style={mst.timeUnit}>
+                              <Text style={mst.timeUnitLabel}>HOUR</Text>
+                              <View style={mst.timeStepper}>
+                                <TouchableOpacity
+                                  style={mst.timeStepBtn}
+                                  onPress={() => setCustomHour(h => (h + 23) % 24)}
+                                >
+                                  <Text style={mst.timeStepBtnTxt}>‹</Text>
+                                </TouchableOpacity>
+                                <Text style={mst.timeValue}>{String(h12).padStart(2, ' ')}</Text>
+                                <TouchableOpacity
+                                  style={mst.timeStepBtn}
+                                  onPress={() => setCustomHour(h => (h + 1) % 24)}
+                                >
+                                  <Text style={mst.timeStepBtnTxt}>›</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+
+                            <Text style={mst.timeColon}>:</Text>
+
+                            {/* Minute */}
+                            <View style={mst.timeUnit}>
+                              <Text style={mst.timeUnitLabel}>MIN</Text>
+                              <View style={mst.timeStepper}>
+                                <TouchableOpacity
+                                  style={mst.timeStepBtn}
+                                  onPress={() => setCustomMinute(m => m === 0 ? 45 : m - 15)}
+                                >
+                                  <Text style={mst.timeStepBtnTxt}>‹</Text>
+                                </TouchableOpacity>
+                                <Text style={mst.timeValue}>{minS}</Text>
+                                <TouchableOpacity
+                                  style={mst.timeStepBtn}
+                                  onPress={() => setCustomMinute(m => (m + 15) % 60)}
+                                >
+                                  <Text style={mst.timeStepBtnTxt}>›</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+
+                            <Text style={mst.timeAmPm}>{ampm.toUpperCase()}</Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })()}
+
                   {/* Duration — shown after a slot is picked */}
                   {selectedSlot && (
                     <DurationSlider value={selectedDuration} onChange={setSelectedDuration} dark={dark} durBg={durBg} textCol={textCol} mutedCol={mutedCol} />
@@ -988,7 +1087,9 @@ export function CreatePlanModal({
                   <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
                     <Text style={[mst.summaryKey, { color: mutedCol }]}>WHEN</Text>
-                    <Text style={[mst.summaryVal, { color: textCol }]} numberOfLines={1}>{selectedSlot ? slotDisplayLabel(selectedSlot) : '—'}</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]} numberOfLines={1}>
+                      {!selectedSlot ? '—' : selectedSlot === CUSTOM_SLOT ? fmtCustomLabel() : slotDisplayLabel(selectedSlot)}
+                    </Text>
                   </View>
                   <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
@@ -1121,7 +1222,7 @@ function InviteCard({
 }
 
 // ─── Plan edit sheet ──────────────────────────────────────────────────────────
-function PlanEditSheet({
+export function PlanEditSheet({
   plan, visible, onClose, userId, onUpdated, onCancelled,
 }: {
   plan: any;
@@ -2355,6 +2456,66 @@ const mst = StyleSheet.create({
     fontWeight: Typography.weights.medium,
     color: '#C47D00',
     flex: 1,
+  },
+
+  // Custom time picker
+  customTimePicker: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    paddingTop: 18,
+    gap: 6,
+  },
+  timeUnit: {
+    alignItems: 'center',
+  },
+  timeUnitLabel: {
+    fontSize: 9,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 1.5,
+    marginBottom: 8,
+  },
+  timeStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  timeStepBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timeStepBtnTxt: {
+    fontSize: 22,
+    color: '#FFFFFF',
+    fontWeight: Typography.weights.black,
+    lineHeight: 26,
+  },
+  timeValue: {
+    fontSize: 32,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+    width: 46,
+    textAlign: 'center',
+    letterSpacing: -1,
+  },
+  timeColon: {
+    fontSize: 32,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.6)',
+    marginBottom: 4,
+    lineHeight: 38,
+  },
+  timeAmPm: {
+    fontSize: 16,
+    fontWeight: Typography.weights.black,
+    color: 'rgba(255,255,255,0.65)',
+    letterSpacing: 1,
+    marginBottom: 6,
   },
 
   // Step 3 — location
