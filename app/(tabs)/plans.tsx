@@ -9,7 +9,8 @@ import { Colors, Typography } from '../../constants/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { showToast } from '../../components/Toast';
 import { useAuth } from '../../hooks/useAuth';
-import { getMyPlans, getPublicPlans, createPlan as createPlanInDB, joinPlan, leavePlan, formatPlanTime, getPendingInvites, subscribeToPlanInvites, acceptPlanInvite, declinePlanInvite, updatePlan, cancelPlan, inviteMoreToPlan } from '../../services/plans';
+import { getMyPlans, getPublicPlans, createPlan as createPlanInDB, joinPlan, leavePlan, formatPlanTime, getPendingInvites, subscribeToPlanInvites, acceptPlanInvite, declinePlanInvite, updatePlan, cancelPlan, inviteMoreToPlan, getFriendAttendances } from '../../services/plans';
+import { fetchHourlyScores } from '../../services/weather';
 import { sendSystemMessage, getGroupChatForPlan, leaveGroup } from '../../services/messages';
 import type { Plan, PendingInviteDisplay } from '../../types';
 import { useFriends } from '../../hooks/useFriends';
@@ -22,7 +23,7 @@ import { notifyBadgeUnlocked } from '../../lib/badgeQueue';
 import { getPlanCount } from '../../services/users';
 import { getSlotConflicts } from '../../lib/timetable';
 
-const { width } = Dimensions.get('window');
+const { width, height: screenHeight } = Dimensions.get('window');
 
 
 // ─── Hardcoded data ───────────────────────────────────────────────────────────
@@ -142,7 +143,9 @@ const ACTIVITIES = [
   { id: 'cinema', label: 'Cinema',  icon: '🎬' },
 ];
 
-const ACT_BOX_W = Math.floor((width - 48 - 30) / 4);
+const ACT_BOX_W  = Math.floor((width - 48 - 30) / 4);
+const SLOT_W     = Math.floor((width - 80) / 3); // 48 modal padding + 32 gap allowance
+const CAL_CELL_W = Math.floor((width - 48) / 7); // 7 columns filling modal width
 
 const DURATIONS = [
   { label: '30 min', value: 30  },
@@ -193,6 +196,37 @@ function slotDisplayLabel(slotId: string): string {
   }
   return slotId;
 }
+
+// ─── Time slot helpers ────────────────────────────────────────────────────────
+// Global slot index: 0 = 00:00, 1 = 00:30, …, 47 = 23:30
+function slotIndexToLabel(idx: number): string {
+  const h = Math.floor(idx / 2);
+  const m = idx % 2 === 0 ? '00' : '30';
+  return `${String(h).padStart(2, '0')}:${m}`;
+}
+function periodForSlotIdx(idx: number): 'morning' | 'afternoon' | 'evening' | null {
+  if (idx >= 12 && idx <= 23) return 'morning';
+  if (idx >= 24 && idx <= 35) return 'afternoon';
+  if (idx >= 36 && idx <= 47) return 'evening';
+  return null;
+}
+function formatDuration(mins: number): string {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+function roundToNearest30(): number {
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return Math.min(47, Math.round(mins / 30));
+}
+const PERIOD_RANGES = {
+  morning:   { start: 12, end: 23 },
+  afternoon: { start: 24, end: 35 },
+  evening:   { start: 36, end: 47 },
+} as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function sortByTime(plans: any[]) {
@@ -248,8 +282,6 @@ function FriendInviteGrid({
   onToggle: (id: string) => void;
 }) {
   const { friends, loading } = useFriends();
-  const COLS = 4;
-  const cellW = (width - 48) / COLS;
 
   if (loading) {
     return (
@@ -277,7 +309,7 @@ function FriendInviteGrid({
           return (
             <TouchableOpacity
               key={friend.id}
-              style={[styles.friendCell, { width: cellW }]}
+              style={styles.friendCell}
               onPress={() => onToggle(friend.id)}
               activeOpacity={0.75}
             >
@@ -632,36 +664,72 @@ export function CreatePlanModal({
   const { slotWeather, forecastLoading } = useWeather();
   const [step, setStep] = useState<1|2|3|4|5>(1);
   const [selectedFriends, setSelectedFriends] = useState<string[]>([]);
-  const [selectedDay, setSelectedDay] = useState<'today' | 'tomorrow' | 'week'>('today');
-  const [selectedSlot, setSelectedSlot] = useState('');
-  const [selectedDuration, setSelectedDuration] = useState(60);
+  const [selectedDay, setSelectedDay] = useState<'today' | 'tomorrow' | 'later'>('today');
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => { const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; });
+  const [selectedPeriod, setSelectedPeriod] = useState<'now' | 'morning' | 'afternoon' | 'evening' | null>(null);
+  const [selectedSlots, setSelectedSlots] = useState<{ startIdx: number; endIdx: number } | null>(null);
   const [selectedLocation, setSelectedLocation] = useState('');
   const [selectedActivity, setSelectedActivity] = useState('');
   const [customActivityName, setCustomActivityName] = useState('');
   const [customActivityEmoji, setCustomActivityEmoji] = useState('✨');
-  const [customHour,   setCustomHour]   = useState(() => Math.min(23, new Date().getHours() + 1));
-  const [customMinute, setCustomMinute] = useState(0);
   const [createGroupChat, setCreateGroupChat] = useState(true);
   const [creating, setCreating] = useState(false);
+  const gridHeightAnim = useRef(new Animated.Value(0)).current;
+  const [slotInfoMap, setSlotInfoMap] = useState<Map<string, { emoji: string; score: number; freeFriends: any[] }>>(new Map());
 
   const CUSTOM_ID   = '__custom__';
-  const CUSTOM_SLOT = 'custom';
   const QUICK_EMOJIS = ['✨','🎉','🏃','🎨','🎵','🍕','🌳','📸','🏊','🎮','🛒','🎤','🌅','🎯','🏋️','🤸','🧘','🎲','🌮','🎪'];
 
   useEffect(() => {
     if (visible) {
-      const initSlot = initialValues?.slot ?? '';
       setStep(1); setSelectedFriends([]);
-      setSelectedSlot(initSlot); setSelectedDuration(60);
+      setSelectedDay('today'); setSelectedDate(null); setSelectedPeriod(null); setSelectedSlots(null);
+      setCalendarMonth(() => { const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; });
       setSelectedLocation(initialValues?.location ?? ''); setSelectedActivity('');
       setCustomActivityName(''); setCustomActivityEmoji('✨');
-      setCustomHour(Math.min(23, new Date().getHours() + 1)); setCustomMinute(0);
       setCreateGroupChat(true); setCreating(false);
-      if (initSlot.startsWith('tmr_')) setSelectedDay('tomorrow');
-      else if (['thu','fri','sat','sun'].includes(initSlot)) setSelectedDay('week');
-      else setSelectedDay('today');
+      gridHeightAnim.setValue(0);
     }
-  }, [visible, initialValues?.location, initialValues?.slot]);
+  }, [visible, initialValues?.location]);
+
+  // Compute per-slot weather + friend availability once on open (or when friends load)
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    Promise.all([
+      fetchHourlyScores().catch(() => new Map<string, { emoji: string; score: number }>()),
+      friends.length > 0
+        ? getFriendAttendances(friends.map(f => f.id)).catch(() => new Map<string, string[]>())
+        : Promise.resolve(new Map<string, string[]>()),
+    ]).then(([wxScores, attendances]) => {
+      if (cancelled) return;
+      const map = new Map<string, { emoji: string; score: number; temp: number | null; freeFriends: any[] }>();
+      for (let dayOff = 0; dayOff <= 13; dayOff++) {
+        const base = new Date();
+        base.setDate(base.getDate() + dayOff);
+        base.setHours(0, 0, 0, 0);
+        for (let idx = 0; idx < 48; idx++) {
+          const hour = Math.floor(idx / 2);
+          const wx = wxScores.get(`${dayOff}:${hour}`);
+          const slotStart = new Date(base.getTime() + idx * 30 * 60000);
+          const slotEnd   = new Date(slotStart.getTime() + 30 * 60000);
+          const freeFriends = friends.filter(f => {
+            const times = attendances.get(f.id) ?? [];
+            return !times.some(t => { const d = new Date(t); return d >= slotStart && d < slotEnd; });
+          });
+          map.set(`${dayOff}:${idx}`, {
+            emoji: wx?.emoji ?? '',
+            score: wx?.score ?? 5,
+            temp:  wx?.temp  ?? null,
+            freeFriends,
+          });
+        }
+      }
+      setSlotInfoMap(map);
+    });
+    return () => { cancelled = true; };
+  }, [visible, friends.length]);
 
   const toggleFriend = (id: string) =>
     setSelectedFriends(prev => prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]);
@@ -672,17 +740,98 @@ export function CreatePlanModal({
   const activityIcon  = selectedActivity === CUSTOM_ID ? customActivityEmoji : (ACTIVITIES.find(a => a.label === selectedActivity)?.icon ?? '');
   const autoTitle = [activityLabel, selectedLocation ? `at ${selectedLocation}` : ''].filter(Boolean).join(' ') || 'Hangout';
 
-  const canNext = step === 2 ? !!selectedSlot
+  const canNext = step === 2 ? (
+    (selectedDay !== 'later' || selectedDate !== null) &&
+    (selectedPeriod === 'now' || selectedSlots !== null)
+  )
     : step === 3 ? !!selectedLocation
     : step === 4 ? (!!selectedActivity && (selectedActivity !== CUSTOM_ID || customActivityName.trim() !== ''))
     : true;
 
-  // Helper: format a time label for the custom slot
-  const fmtCustomLabel = () => {
-    const h12 = customHour === 0 ? 12 : customHour > 12 ? customHour - 12 : customHour;
-    const ampm = customHour < 12 ? 'am' : 'pm';
-    const minStr = customMinute < 10 ? `0${customMinute}` : `${customMinute}`;
-    return `Custom  ·  ${h12}:${minStr} ${ampm}`;
+  const GRID_MAX_H = 400;
+
+  const handleDayPress = (day: 'today' | 'tomorrow' | 'later') => {
+    setSelectedDay(day);
+    setSelectedPeriod(null);
+    setSelectedSlots(null);
+    if (day !== 'later') setSelectedDate(null);
+    Animated.timing(gridHeightAnim, { toValue: 0, duration: 200, useNativeDriver: false }).start();
+  };
+
+  const handleCalendarDateTap = (date: Date) => {
+    const today0 = new Date(); today0.setHours(0,0,0,0);
+    const tomorrow0 = new Date(today0); tomorrow0.setDate(today0.getDate() + 1);
+    const t = date.getTime();
+    if (t < today0.getTime()) return;
+    if (t === today0.getTime()) { handleDayPress('today'); return; }
+    if (t === tomorrow0.getTime()) { handleDayPress('tomorrow'); return; }
+    setSelectedDate(date);
+    setSelectedPeriod(null);
+    setSelectedSlots(null);
+    Animated.timing(gridHeightAnim, { toValue: 0, duration: 200, useNativeDriver: false }).start();
+  };
+
+  const handlePeriodPress = (period: 'now' | 'morning' | 'afternoon' | 'evening') => {
+    if (period === 'now') {
+      setSelectedPeriod('now');
+      setSelectedSlots({ startIdx: roundToNearest30(), endIdx: roundToNearest30() });
+      Animated.timing(gridHeightAnim, { toValue: 0, duration: 200, useNativeDriver: false }).start();
+      return;
+    }
+    if (selectedPeriod === period) {
+      setSelectedPeriod(null);
+      setSelectedSlots(null);
+      Animated.timing(gridHeightAnim, { toValue: 0, duration: 200, useNativeDriver: false }).start();
+    } else {
+      setSelectedPeriod(period);
+      setSelectedSlots(null);
+      Animated.timing(gridHeightAnim, { toValue: GRID_MAX_H, duration: 250, useNativeDriver: false }).start();
+    }
+  };
+
+  const handleSlotPress = (idx: number) => {
+    if (!selectedSlots) {
+      setSelectedSlots({ startIdx: idx, endIdx: idx });
+      return;
+    }
+    const { startIdx, endIdx } = selectedSlots;
+    const isSel = idx >= startIdx && idx <= endIdx;
+    if (isSel) {
+      if (idx === startIdx && idx === endIdx) {
+        setSelectedSlots(null);
+      } else if (idx === startIdx) {
+        setSelectedSlots({ startIdx: startIdx + 1, endIdx });
+      } else if (idx === endIdx) {
+        setSelectedSlots({ startIdx, endIdx: endIdx - 1 });
+      } else {
+        setSelectedSlots({ startIdx, endIdx: idx - 1 });
+      }
+    } else {
+      if (idx === endIdx + 1 || idx === startIdx - 1) {
+        setSelectedSlots({ startIdx: Math.min(startIdx, idx), endIdx: Math.max(endIdx, idx) });
+      } else {
+        setSelectedSlots({ startIdx: idx, endIdx: idx });
+      }
+    }
+  };
+
+  const handleDurationChange = (delta: number) => {
+    if (!selectedSlots) return;
+    const { startIdx, endIdx } = selectedSlots;
+    if (delta > 0) {
+      const count = endIdx - startIdx + 1;
+      if (count >= 8) return; // 4 hours max
+      const newEnd = endIdx + 1;
+      if (newEnd > 47) return;
+      const newPeriod = periodForSlotIdx(newEnd);
+      if (newPeriod && newPeriod !== selectedPeriod) {
+        setSelectedPeriod(newPeriod);
+      }
+      setSelectedSlots({ startIdx, endIdx: newEnd });
+    } else {
+      if (endIdx === startIdx) return; // min 30 min
+      setSelectedSlots({ startIdx, endIdx: endIdx - 1 });
+    }
   };
 
   const handleCreate = async () => {
@@ -694,22 +843,27 @@ export function CreatePlanModal({
     let weatherEmoji: string;
     let weatherTemp: number;
 
-    if (selectedSlot === CUSTOM_SLOT) {
-      const d = new Date();
-      if (selectedDay === 'tomorrow') d.setDate(d.getDate() + 1);
-      else if (selectedDay === 'week') d.setDate(d.getDate() + 2); // thu fallback
-      d.setHours(customHour, customMinute, 0, 0);
-      slotISO   = d.toISOString();
-      slotLabel = fmtCustomLabel();
-      weatherEmoji = '⛅'; weatherTemp = 18;
-    } else {
-      slotISO = slotToISO(selectedSlot || 'afternoon');
-      slotLabel = selectedSlot ? slotDisplayLabel(selectedSlot) : 'Afternoon  ·  12:00 – 5:00pm';
-      const fallbackSlot = TIME_PERIODS.flatMap(p => p.slots).find(s => s.id === selectedSlot);
-      const wx = slotWeather(selectedSlot || 'afternoon');
-      weatherEmoji = wx ? wx.emoji : (fallbackSlot?.weather ?? '⛅');
-      weatherTemp  = wx ? wx.temp  : (fallbackSlot?.temp  ?? 18);
+    const startIdx = selectedSlots?.startIdx ?? roundToNearest30();
+    const endIdx   = selectedSlots?.endIdx   ?? startIdx;
+    const durMins  = (endIdx - startIdx + 1) * 30;
+    let dayOffset = 0;
+    if (selectedDay === 'tomorrow') {
+      dayOffset = 1;
+    } else if (selectedDay === 'later' && selectedDate) {
+      const t0 = new Date(); t0.setHours(0,0,0,0);
+      const s0 = new Date(selectedDate); s0.setHours(0,0,0,0);
+      dayOffset = Math.round((s0.getTime() - t0.getTime()) / 86400000);
     }
+    const d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    d.setHours(Math.floor(startIdx / 2), (startIdx % 2) * 30, 0, 0);
+    slotISO = d.toISOString();
+    const dayLabel = selectedDay === 'today' ? 'Today'
+      : selectedDay === 'tomorrow' ? 'Tomorrow'
+      : selectedDate ? selectedDate.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+      : 'Later';
+    slotLabel    = `${dayLabel}  ·  ${slotIndexToLabel(startIdx)} – ${slotIndexToLabel(endIdx + 1)}`;
+    weatherEmoji = '⛅'; weatherTemp = 18;
     const weatherStr = `${weatherEmoji} ${weatherTemp}°C`;
 
     const localPlan = { id: `u_${Date.now()}`, title: autoTitle, location: selectedLocation, time: slotLabel, weather: weatherStr };
@@ -720,7 +874,7 @@ export function CreatePlanModal({
     if (user) {
       setCreating(true);
       try {
-        const groupEndTime = new Date(new Date(slotISO).getTime() + selectedDuration * 60 * 1000).toISOString();
+        const groupEndTime = new Date(new Date(slotISO).getTime() + durMins * 60 * 1000).toISOString();
         const { plan: dbPlan } = await createPlanInDB(
           {
             creator_id: user.id,
@@ -798,159 +952,282 @@ export function CreatePlanModal({
 
             {/* ── Step 2: When ── */}
             {step === 2 && (() => {
-              const activePeriod = TIME_PERIODS.find(p => p.day === selectedDay)!;
-              const onlineFriends = selectedFriendObjs;
+              const now = new Date();
+              const nowMins = now.getHours() * 60 + now.getMinutes();
+              const range = selectedPeriod && selectedPeriod !== 'now'
+                ? PERIOD_RANGES[selectedPeriod as keyof typeof PERIOD_RANGES]
+                : null;
+              const durMins = selectedSlots
+                ? (selectedSlots.endIdx - selectedSlots.startIdx + 1) * 30
+                : 0;
+              const durLabel = durMins > 0 ? formatDuration(durMins) : '';
+
+              // Actual day offset from today for slot/weather lookups
+              const today0 = new Date(); today0.setHours(0,0,0,0);
+              const dayOff = selectedDay === 'today' ? 0
+                : selectedDay === 'tomorrow' ? 1
+                : selectedDate
+                  ? Math.round((new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate()).getTime() - today0.getTime()) / 86400000)
+                  : 2;
+
+              const DAY_LABELS = { today: 'TODAY', tomorrow: 'TOMORROW', later: 'LATER' };
+              const dayResolved = selectedDay !== 'later' || selectedDate !== null;
+              const periodOptions: ('now' | 'morning' | 'afternoon' | 'evening')[] =
+                selectedDay === 'today'
+                  ? ['now', 'morning', 'afternoon', 'evening']
+                  : ['morning', 'afternoon', 'evening'];
+              const PERIOD_LABELS = { now: 'NOW', morning: 'MORNING', afternoon: 'AFTERNOON', evening: 'EVENING' };
+
+              // Calendar helpers (only used when selectedDay === 'later')
+              const calYear = calendarMonth.getFullYear();
+              const calMonthIdx = calendarMonth.getMonth();
+              const calFirstDow = new Date(calYear, calMonthIdx, 1).getDay();
+              const calDaysInMonth = new Date(calYear, calMonthIdx + 1, 0).getDate();
+              const canGoBackMonth = calYear > today0.getFullYear() || calMonthIdx > today0.getMonth();
+
               return (
-                <>
-                  {/* Day toggle */}
-                  <View style={mst.dayToggleRow}>
-                    {TIME_PERIODS.map(p => {
-                      const active = selectedDay === p.day;
+                <View style={mst.step2Container}>
+                  {/* Day row */}
+                  <View style={[mst.periodPillRow, { marginBottom: 10 }]}>
+                    {(['today', 'tomorrow', 'later'] as const).map(d => {
+                      const active = selectedDay === d;
+                      const label = d === 'later' && selectedDate
+                        ? selectedDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }).toUpperCase()
+                        : DAY_LABELS[d];
                       return (
                         <TouchableOpacity
-                          key={p.day}
-                          style={[mst.dayBtn, active && mst.dayBtnActive, !active && { backgroundColor: cardBg, borderColor: cardBorder }]}
-                          onPress={() => { setSelectedDay(p.day as any); setSelectedSlot(''); }}
+                          key={d}
+                          style={[mst.periodPill, { flex: 1 }, active && mst.periodPillActive, !active && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                          onPress={() => handleDayPress(d)}
                           activeOpacity={0.8}
                         >
-                          <Text style={[mst.dayBtnText, active && mst.dayBtnTextActive, !active && { color: mutedCol }]}>
-                            {p.label}
+                          <Text style={[mst.periodPillText, active && mst.periodPillTextActive, !active && { color: mutedCol }]}>
+                            {label}
                           </Text>
                         </TouchableOpacity>
                       );
                     })}
                   </View>
 
-                  {/* Slots for selected day */}
-                  {activePeriod.slots.map(slot => {
-                    const sel = selectedSlot === slot.id;
-                    const isNow = slot.id === 'now';
-                    const wx = slotWeather(slot.id);
-                    const emoji = wx ? wx.emoji : slot.weather;
-                    const temp  = wx ? wx.temp  : slot.temp;
-                    const conflicts = getSlotConflicts(slot.id);
-                    return (
-                      <TouchableOpacity
-                        key={slot.id}
-                        style={[mst.slotCard, sel && mst.slotCardSel, !sel && { backgroundColor: cardBg, borderColor: cardBorder }]}
-                        onPress={() => setSelectedSlot(slot.id)}
-                        activeOpacity={0.85}
-                      >
-                        <View style={mst.slotTop}>
-                          <View>
-                            <Text style={[mst.slotLabel, sel ? mst.slotLabelSel : { color: textCol }]}>{slot.label}</Text>
-                            <Text style={[mst.slotSub,   sel ? mst.slotSubSel  : { color: mutedCol }]}>{slot.sub}</Text>
-                          </View>
-                          <View style={mst.slotWeatherWrap}>
-                            {forecastLoading
-                              ? <ActivityIndicator size="small" color={sel ? 'rgba(255,255,255,0.6)' : mutedCol} />
-                              : <Text style={mst.slotEmoji}>{emoji}</Text>
-                            }
-                            <Text style={[mst.slotTemp, sel ? mst.slotTempSel : { color: textCol }]}>{forecastLoading ? '—' : `${temp}°C`}</Text>
-                          </View>
-                        </View>
-                        {selectedFriendObjs.length > 0 && (
-                          <View style={mst.slotFriends}>
-                            {selectedFriendObjs.slice(0, 5).map(f => (
-                              <View key={f.id} style={mst.slotAvatar}>
-                                <Text style={mst.slotAvatarTxt}>{f.avatar_initials || f.full_name.slice(0,2).toUpperCase()}</Text>
-                                {isNow && <View style={mst.slotGreenDot} />}
-                              </View>
-                            ))}
-                            <Text style={[mst.slotCount, sel ? { color: 'rgba(255,255,255,0.75)' } : { color: mutedCol }]}>
-                              {isNow ? `${onlineFriends.length} free now` : `${selectedFriendObjs.length} might join`}
-                            </Text>
-                          </View>
-                        )}
-                        {conflicts.length > 0 && (
-                          <View style={mst.conflictBadge}>
-                            <Text style={mst.conflictText}>
-                              {'⚠️  You have a class: ' + conflicts.map(c => c.title.split('–')[0].trim()).join(', ')}
-                            </Text>
-                          </View>
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })}
+                  {/* Calendar — shown when LATER is selected and no date chosen yet */}
+                  {selectedDay === 'later' && (
+                    <View style={[mst.calendarWrap, { borderColor: cardBorder, backgroundColor: dark ? '#162640' : Colors.gray100 }]}>
+                      {/* Month nav */}
+                      <View style={mst.calMonthRow}>
+                        <TouchableOpacity
+                          onPress={() => { if (!canGoBackMonth) return; const m = new Date(calendarMonth); m.setMonth(m.getMonth() - 1); setCalendarMonth(m); }}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <Text style={[mst.calNavBtn, { color: canGoBackMonth ? textCol : mutedCol }]}>‹</Text>
+                        </TouchableOpacity>
+                        <Text style={[mst.calMonthLabel, { color: textCol }]}>
+                          {calendarMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }).toUpperCase()}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => { const m = new Date(calendarMonth); m.setMonth(m.getMonth() + 1); setCalendarMonth(m); }}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <Text style={[mst.calNavBtn, { color: textCol }]}>›</Text>
+                        </TouchableOpacity>
+                      </View>
 
-                  {/* Custom time card */}
-                  {(() => {
-                    const isSel = selectedSlot === CUSTOM_SLOT;
-                    const h12   = customHour === 0 ? 12 : customHour > 12 ? customHour - 12 : customHour;
-                    const ampm  = customHour < 12 ? 'am' : 'pm';
-                    const minS  = customMinute < 10 ? `0${customMinute}` : `${customMinute}`;
-                    return (
-                      <TouchableOpacity
-                        style={[mst.slotCard, isSel && mst.slotCardSel, !isSel && { backgroundColor: cardBg, borderColor: cardBorder }]}
-                        onPress={() => setSelectedSlot(CUSTOM_SLOT)}
-                        activeOpacity={0.85}
-                      >
-                        <View style={mst.slotTop}>
-                          <View>
-                            <Text style={[mst.slotLabel, isSel ? mst.slotLabelSel : { color: textCol }]}>Custom time</Text>
-                            <Text style={[mst.slotSub, isSel ? mst.slotSubSel : { color: mutedCol }]}>
-                              {isSel ? `${h12}:${minS} ${ampm}` : 'Pick a specific time'}
-                            </Text>
-                          </View>
-                          <Ionicons name="time-outline" size={22} color={isSel ? 'rgba(255,255,255,0.85)' : mutedCol} />
-                        </View>
+                      {/* Weekday labels */}
+                      <View style={mst.calWeekRow}>
+                        {['S','M','T','W','T','F','S'].map((wd, i) => (
+                          <Text key={i} style={[mst.calWeekDay, { width: CAL_CELL_W, color: mutedCol }]}>{wd}</Text>
+                        ))}
+                      </View>
 
-                        {isSel && (
-                          <View style={mst.customTimePicker}>
-                            {/* Hour */}
-                            <View style={mst.timeUnit}>
-                              <Text style={mst.timeUnitLabel}>HOUR</Text>
-                              <View style={mst.timeStepper}>
-                                <TouchableOpacity
-                                  style={mst.timeStepBtn}
-                                  onPress={() => setCustomHour(h => (h + 23) % 24)}
-                                >
-                                  <Text style={mst.timeStepBtnTxt}>‹</Text>
-                                </TouchableOpacity>
-                                <Text style={mst.timeValue}>{String(h12).padStart(2, ' ')}</Text>
-                                <TouchableOpacity
-                                  style={mst.timeStepBtn}
-                                  onPress={() => setCustomHour(h => (h + 1) % 24)}
-                                >
-                                  <Text style={mst.timeStepBtnTxt}>›</Text>
-                                </TouchableOpacity>
-                              </View>
-                            </View>
-
-                            <Text style={mst.timeColon}>:</Text>
-
-                            {/* Minute */}
-                            <View style={mst.timeUnit}>
-                              <Text style={mst.timeUnitLabel}>MIN</Text>
-                              <View style={mst.timeStepper}>
-                                <TouchableOpacity
-                                  style={mst.timeStepBtn}
-                                  onPress={() => setCustomMinute(m => m === 0 ? 45 : m - 15)}
-                                >
-                                  <Text style={mst.timeStepBtnTxt}>‹</Text>
-                                </TouchableOpacity>
-                                <Text style={mst.timeValue}>{minS}</Text>
-                                <TouchableOpacity
-                                  style={mst.timeStepBtn}
-                                  onPress={() => setCustomMinute(m => (m + 15) % 60)}
-                                >
-                                  <Text style={mst.timeStepBtnTxt}>›</Text>
-                                </TouchableOpacity>
-                              </View>
-                            </View>
-
-                            <Text style={mst.timeAmPm}>{ampm.toUpperCase()}</Text>
-                          </View>
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })()}
-
-                  {/* Duration — shown after a slot is picked */}
-                  {selectedSlot && (
-                    <DurationSlider value={selectedDuration} onChange={setSelectedDuration} dark={dark} durBg={durBg} textCol={textCol} mutedCol={mutedCol} />
+                      {/* Day grid */}
+                      <View style={mst.calGrid}>
+                        {Array.from({ length: calFirstDow }, (_, i) => (
+                          <View key={`e${i}`} style={{ width: CAL_CELL_W, height: 44 }} />
+                        ))}
+                        {Array.from({ length: calDaysInMonth }, (_, i) => {
+                          const dayNum = i + 1;
+                          const cellDate = new Date(calYear, calMonthIdx, dayNum);
+                          cellDate.setHours(0,0,0,0);
+                          const isPastDay = cellDate < today0;
+                          const isToday = cellDate.getTime() === today0.getTime();
+                          const tomorrow0 = new Date(today0); tomorrow0.setDate(today0.getDate() + 1);
+                          const isTomorrow = cellDate.getTime() === tomorrow0.getTime();
+                          const isSelDate = selectedDate
+                            ? cellDate.getTime() === new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate()).getTime()
+                            : false;
+                          return (
+                            <TouchableOpacity
+                              key={dayNum}
+                              disabled={isPastDay}
+                              onPress={() => handleCalendarDateTap(cellDate)}
+                              style={[
+                                mst.calDay,
+                                { width: CAL_CELL_W },
+                                isPastDay && mst.calDayPast,
+                                (isToday || isTomorrow) && !isPastDay && !isSelDate && mst.calDaySpecial,
+                                isSelDate && mst.calDaySelected,
+                              ]}
+                            >
+                              <Text style={[
+                                mst.calDayNum,
+                                { color: isPastDay ? Colors.gray300 : isSelDate ? '#FFFFFF' : textCol },
+                              ]}>
+                                {dayNum}
+                              </Text>
+                              {isToday && !isSelDate && <Text style={[mst.calDayTag, { color: Colors.navy }]}>TODAY</Text>}
+                              {isTomorrow && !isSelDate && <Text style={[mst.calDayTag, { color: Colors.navy }]}>TMR</Text>}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
                   )}
-                </>
+
+                  {/* Period pill row — only once a day is resolved */}
+                  {dayResolved && (
+                  <View style={mst.periodPillRow}>
+                    {periodOptions.map(p => {
+                      const active = selectedPeriod === p;
+                      return (
+                        <TouchableOpacity
+                          key={p}
+                          style={[mst.periodPill, active && mst.periodPillActive, !active && { backgroundColor: cardBg, borderColor: cardBorder }]}
+                          onPress={() => handlePeriodPress(p)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={[mst.periodPillText, active && mst.periodPillTextActive, !active && { color: mutedCol }]}>
+                            {PERIOD_LABELS[p]}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  )}
+
+                  {/* NOW — show immediate confirmation */}
+                  {selectedPeriod === 'now' && selectedSlots && (
+                    <View style={[mst.nowSummaryRow, { backgroundColor: summaryBg, borderColor: summaryBord }]}>
+                      <Text style={[mst.timeSummaryText, { color: textCol }]}>
+                        {slotIndexToLabel(selectedSlots.startIdx)} – {slotIndexToLabel(selectedSlots.endIdx + 1)}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Animated slot grid (MORNING / AFTERNOON / EVENING only) */}
+                  <Animated.View style={{ maxHeight: gridHeightAnim, overflow: 'hidden', alignSelf: 'stretch' }}>
+                    {range && (() => {
+                      return (
+                        <>
+                          {/* Legend */}
+                          <View style={mst.slotLegend}>
+                            <Text style={[mst.slotLegendText, { color: mutedCol }]}>🟢 Friends free  ☀️ Good weather</Text>
+                          </View>
+
+                          <View style={mst.slotGrid}>
+                            {Array.from({ length: range.end - range.start + 1 }, (_, i) => {
+                              const idx = range.start + i;
+                              const slotMins = idx * 30;
+                              const isPast = selectedDay === 'today' && slotMins < nowMins;
+                              const isSel = !!(selectedSlots && idx >= selectedSlots.startIdx && idx <= selectedSlots.endIdx);
+                              const isFirstSel = isSel && idx === selectedSlots!.startIdx;
+                              const isLastSel  = isSel && idx === selectedSlots!.endIdx;
+                              const info = slotInfoMap.get(`${dayOff}:${idx}`);
+                              const wxEmoji = info?.emoji ?? '';
+                              const wxScore = info?.score ?? 5;
+                              const wxTemp  = info?.temp  ?? null;
+                              const freeFriends: any[] = info?.freeFriends ?? [];
+                              const hasGreenTint = !isSel && !isPast && freeFriends.length >= 3;
+                              const isBest = !isSel && !isPast && wxScore >= 7 && freeFriends.length >= 2;
+                              return (
+                                <TouchableOpacity
+                                  key={idx}
+                                  disabled={isPast}
+                                  onPress={() => handleSlotPress(idx)}
+                                  activeOpacity={0.75}
+                                  style={[
+                                    mst.slotPill,
+                                    isPast && mst.slotPillPast,
+                                    !isPast && !isSel && { backgroundColor: hasGreenTint ? '#E8F5E9' : cardBg, borderColor: cardBorder },
+                                    isSel && mst.slotPillSel,
+                                    isSel && {
+                                      borderLeftWidth:        isFirstSel ? 2 : 0,
+                                      borderRightWidth:       isLastSel  ? 2 : 0,
+                                      borderTopLeftRadius:    isFirstSel ? 6 : 0,
+                                      borderBottomLeftRadius: isFirstSel ? 6 : 0,
+                                      borderTopRightRadius:   isLastSel  ? 6 : 0,
+                                      borderBottomRightRadius: isLastSel ? 6 : 0,
+                                    },
+                                  ]}
+                                >
+                                  <Text style={[mst.slotPillText, isPast && mst.slotPillTextPast, isSel && mst.slotPillTextSel]}>
+                                    {slotIndexToLabel(idx)}
+                                  </Text>
+                                  {!isPast && wxEmoji !== '' && (
+                                    <View style={mst.slotPillWeatherRow}>
+                                      <Text style={mst.slotPillEmoji}>{wxEmoji}</Text>
+                                      {wxTemp !== null && (
+                                        <Text style={[mst.slotPillTemp, isSel && { color: 'rgba(255,255,255,0.8)' }, isPast && mst.slotPillTextPast]}>
+                                          {wxTemp}°
+                                        </Text>
+                                      )}
+                                    </View>
+                                  )}
+                                  {!isPast && freeFriends.length > 0 && (
+                                    <View style={mst.slotPillAvatarRow}>
+                                      {freeFriends.slice(0, 3).map((f: any) => (
+                                        <View key={f.id} style={mst.slotPillAvatar}>
+                                          <Text style={mst.slotPillAvatarTxt}>
+                                            {(f.avatar_initials || f.full_name?.slice(0, 2) || '?').toUpperCase()}
+                                          </Text>
+                                        </View>
+                                      ))}
+                                      {freeFriends.length > 3 && (
+                                        <Text style={[mst.slotPillMore, isSel && { color: 'rgba(255,255,255,0.7)' }]}>
+                                          +{freeFriends.length - 3}
+                                        </Text>
+                                      )}
+                                    </View>
+                                  )}
+                                  {isBest && <Text style={mst.slotBestLabel}>BEST</Text>}
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </>
+                      );
+                    })()}
+                  </Animated.View>
+
+                  {/* Duration control — shown for any period once a time is set */}
+                  {selectedSlots && (
+                    <View style={[mst.durationCtrl, { backgroundColor: durBg, alignSelf: 'stretch' }]}>
+                      <Text style={[mst.durationCtrlLabel, { color: mutedCol }]}>DURATION</Text>
+                      <View style={mst.durationCtrlRow}>
+                        <TouchableOpacity
+                          style={[mst.durationCtrlBtn, { borderColor: dark ? 'rgba(255,255,255,0.3)' : Colors.black, backgroundColor: cardBg }]}
+                          onPress={() => handleDurationChange(-1)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={[mst.durationCtrlBtnTxt, { color: textCol }]}>−</Text>
+                        </TouchableOpacity>
+                        <Text style={[mst.durationCtrlValue, { color: textCol }]}>{durLabel}</Text>
+                        <TouchableOpacity
+                          style={[mst.durationCtrlBtn, { borderColor: dark ? 'rgba(255,255,255,0.3)' : Colors.black, backgroundColor: cardBg }]}
+                          onPress={() => handleDurationChange(1)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={[mst.durationCtrlBtnTxt, { color: textCol }]}>+</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+
+                  {/* Time summary */}
+                  {selectedSlots && (
+                    <Text style={[mst.timeSummaryText, { color: textCol }]}>
+                      {slotIndexToLabel(selectedSlots.startIdx)} – {slotIndexToLabel(selectedSlots.endIdx + 1)} · {durLabel}
+                    </Text>
+                  )}
+                </View>
               );
             })()}
 
@@ -1088,13 +1365,19 @@ export function CreatePlanModal({
                   <View style={mst.summaryRow}>
                     <Text style={[mst.summaryKey, { color: mutedCol }]}>WHEN</Text>
                     <Text style={[mst.summaryVal, { color: textCol }]} numberOfLines={1}>
-                      {!selectedSlot ? '—' : selectedSlot === CUSTOM_SLOT ? fmtCustomLabel() : slotDisplayLabel(selectedSlot)}
+                      {selectedSlots
+                        ? `${selectedDay === 'today' ? 'Today' : selectedDay === 'tomorrow' ? 'Tomorrow' : selectedDate ? selectedDate.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : 'Later'}  ·  ${slotIndexToLabel(selectedSlots.startIdx)} – ${slotIndexToLabel(selectedSlots.endIdx + 1)}`
+                        : '—'}
                     </Text>
                   </View>
                   <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
                     <Text style={[mst.summaryKey, { color: mutedCol }]}>FOR</Text>
-                    <Text style={[mst.summaryVal, { color: textCol }]}>{DURATIONS.find(d => d.value === selectedDuration)?.label ?? '1 hr'}</Text>
+                    <Text style={[mst.summaryVal, { color: textCol }]}>
+                      {selectedSlots
+                        ? formatDuration((selectedSlots.endIdx - selectedSlots.startIdx + 1) * 30)
+                        : '—'}
+                    </Text>
                   </View>
                   <View style={[mst.summaryDivider, { backgroundColor: dividerCol }]} />
                   <View style={mst.summaryRow}>
@@ -1120,10 +1403,29 @@ export function CreatePlanModal({
                     <View style={[mst.toggleThumb, createGroupChat && mst.toggleThumbOn]} />
                   </View>
                 </TouchableOpacity>
+
+                {/* Share / export */}
+                <Text style={[mst.shareLabel, { color: mutedCol }]}>ALSO SHARE VIA</Text>
+                <View style={mst.shareRow}>
+                  <TouchableOpacity
+                    style={[mst.shareBtn, { backgroundColor: cardBg, borderColor: dark ? 'rgba(255,255,255,0.2)' : Colors.black }]}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="calendar-outline" size={20} color={textCol} />
+                    <Text style={[mst.shareBtnText, { color: textCol }]}>Add to Calendar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[mst.shareBtn, { backgroundColor: cardBg, borderColor: dark ? 'rgba(255,255,255,0.2)' : Colors.black }]}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="share-outline" size={20} color={textCol} />
+                    <Text style={[mst.shareBtnText, { color: textCol }]}>Share Invite</Text>
+                  </TouchableOpacity>
+                </View>
               </>
             )}
 
-            <View style={{ height: 24 }} />
+            <View style={{ height: 40 }} />
           </ScrollView>
 
           {/* Footer */}
@@ -2019,8 +2321,8 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 1.5 },
   legendText: { fontSize: 10, color: Colors.gray500, fontWeight: Typography.weights.medium },
-  friendGrid: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 16 },
-  friendCell: { alignItems: 'center', justifyContent: 'center', height: 90, gap: 4 },
+  friendGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+  friendCell: { alignItems: 'center', justifyContent: 'center', height: 90, gap: 4, margin: 8 },
   friendCellName: { fontSize: 11, fontWeight: Typography.weights.black, color: Colors.navy, textAlign: 'center' },
   friendCellNameBusy: { color: Colors.gray500 },
   friendCellNameSelected: { color: Colors.navy },
@@ -2040,6 +2342,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    alignSelf: 'stretch',
     backgroundColor: Colors.bluePale,
     borderWidth: 1,
     borderColor: Colors.black,
@@ -2364,7 +2667,7 @@ const mst = StyleSheet.create({
     borderColor: Colors.black,
     paddingTop: 16,
     paddingHorizontal: 24,
-    maxHeight: '90%',
+    maxHeight: '85%',
   },
   handle: {
     width: 40, height: 4,
@@ -2388,7 +2691,7 @@ const mst = StyleSheet.create({
 
   // Header
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  title: { fontSize: 22, fontWeight: Typography.weights.black, color: Colors.navy, letterSpacing: -0.5 },
+  title: { fontSize: 22, fontWeight: Typography.weights.black, color: Colors.navy, letterSpacing: -0.5, textAlign: 'center' },
   closeBtn: {
     width: 32, height: 32,
     borderRadius: 16,
@@ -2398,8 +2701,8 @@ const mst = StyleSheet.create({
   },
 
   // Body
-  body: { marginTop: 16 },
-  hint: { fontSize: Typography.sizes.sm, color: Colors.gray500, marginBottom: 16, lineHeight: 20 },
+  body: { marginTop: 16, flexShrink: 1 },
+  hint: { fontSize: Typography.sizes.sm, color: Colors.gray500, marginBottom: 16, lineHeight: 20, textAlign: 'center' },
 
   // Step 2 — time slots
   periodSection: { marginBottom: 20 },
@@ -2654,7 +2957,7 @@ const mst = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingTop: 16,
+    marginTop: 16,
     paddingBottom: 32,
   },
   backBtn: {
@@ -2675,7 +2978,205 @@ const mst = StyleSheet.create({
   nextBtnOff: { opacity: 0.35 },
   nextBtnTxt: { fontSize: 12, fontWeight: Typography.weights.black, letterSpacing: 1.5, color: '#FFFFFF' },
 
-  // Day toggle (step 2)
+  // ── Step 2 outer wrapper
+  step2Container: {
+    alignItems: 'center',
+  },
+
+  // ── Step 2: period pills ──────────────────────────────────────────────────
+  periodPillRow: {
+    flexDirection: 'row',
+    flexWrap: 'nowrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: 14,
+    alignSelf: 'stretch',
+  },
+  periodPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 2,
+    borderColor: Colors.gray300,
+    borderRadius: 20,
+    alignItems: 'center',
+    backgroundColor: Colors.white,
+  },
+  periodPillActive: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
+  periodPillText: {
+    fontSize: 11,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 0.5,
+    color: Colors.navy,
+  },
+  periodPillTextActive: { color: '#FFFFFF' },
+
+  // NOW confirmation row
+  nowSummaryRow: {
+    borderRadius: 10,
+    borderWidth: 1.5,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 8,
+    alignItems: 'center',
+    alignSelf: 'stretch',
+  },
+
+  // Slot grid
+  slotGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 4,
+    marginBottom: 12,
+  },
+  slotPill: {
+    width: SLOT_W,
+    height: 72,
+    margin: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: Colors.black,
+    backgroundColor: Colors.white,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  slotPillPast: {
+    backgroundColor: Colors.gray100,
+    borderColor: Colors.gray300,
+  },
+  slotPillSel: {
+    backgroundColor: Colors.navy,
+    borderColor: Colors.navy,
+  },
+  slotPillText: {
+    fontSize: 13,
+    fontWeight: '700' as const,
+    color: Colors.navy,
+    textAlign: 'center',
+  },
+  slotPillTextPast: { color: Colors.gray300 },
+  slotPillTextSel: { color: '#FFFFFF' },
+  slotPillWeatherRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  slotPillEmoji: {
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  slotPillTemp: {
+    fontSize: 10,
+    fontWeight: Typography.weights.bold,
+    color: Colors.navy,
+  },
+  slotPillAvatarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'nowrap',
+    gap: 2,
+  },
+  slotPillAvatar: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: Colors.navy,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  slotPillAvatarTxt: {
+    fontSize: 7,
+    fontWeight: Typography.weights.black,
+    color: '#FFFFFF',
+  },
+  slotPillMore: {
+    fontSize: 7,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+  },
+  slotBestLabel: {
+    fontSize: 8,
+    fontWeight: '900' as const,
+    color: '#2D6A4F',
+    letterSpacing: 1,
+    marginTop: 2,
+  },
+  slotLegend: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    paddingBottom: 8,
+  },
+  slotLegendText: {
+    fontSize: 11,
+    color: Colors.gray500,
+    textAlign: 'center',
+  },
+
+  // Duration control
+  durationCtrl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    marginBottom: 10,
+  },
+  durationCtrlLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+    flex: 1,
+  },
+  durationCtrlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  durationCtrlBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: Colors.black,
+    shadowOffset: { width: 2, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 4,
+  },
+  durationCtrlBtnTxt: {
+    fontSize: 20,
+    fontWeight: Typography.weights.black,
+    lineHeight: 24,
+  },
+  durationCtrlValue: {
+    fontSize: Typography.sizes.md,
+    fontWeight: Typography.weights.black,
+    minWidth: 56,
+    textAlign: 'center',
+  },
+
+  // Time summary line
+  timeSummaryText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    color: Colors.navy,
+    textAlign: 'center',
+    marginBottom: 10,
+    letterSpacing: 0.3,
+  },
+
+  // Day toggle (step 2) — kept for any remaining references
   dayToggleRow: {
     flexDirection: 'row',
     gap: 8,
@@ -2775,6 +3276,106 @@ const mst = StyleSheet.create({
     fontWeight: Typography.weights.bold,
     color: Colors.gray500,
     textAlign: 'center',
+  },
+
+  // Calendar (LATER day picker)
+  calendarWrap: {
+    alignSelf: 'stretch',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    padding: 12,
+    marginBottom: 14,
+  },
+  calMonthRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  calNavBtn: {
+    fontSize: 24,
+    fontWeight: Typography.weights.black,
+    lineHeight: 28,
+  },
+  calMonthLabel: {
+    fontSize: 12,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 1,
+  },
+  calWeekRow: {
+    flexDirection: 'row',
+    marginBottom: 4,
+  },
+  calWeekDay: {
+    fontSize: 10,
+    fontWeight: Typography.weights.bold,
+    textAlign: 'center',
+  },
+  calGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  calDay: {
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+  },
+  calDayPast: {
+    opacity: 0.3,
+  },
+  calDaySpecial: {
+    borderWidth: 1.5,
+    borderColor: Colors.navy,
+  },
+  calDaySelected: {
+    backgroundColor: Colors.navy,
+  },
+  calDayNum: {
+    fontSize: 13,
+    fontWeight: Typography.weights.bold,
+    textAlign: 'center',
+  },
+  calDayTag: {
+    fontSize: 6,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 0.3,
+    textAlign: 'center',
+    marginTop: 1,
+  },
+
+  // Step 5 — share / export
+  shareLabel: {
+    fontSize: 10,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 2,
+    color: Colors.gray500,
+    marginTop: 20,
+    marginBottom: 10,
+  },
+  shareRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  shareBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 2,
+    borderRadius: 12,
+    paddingVertical: 14,
+    shadowColor: Colors.black,
+    shadowOffset: { width: 3, height: 3 },
+    shadowOpacity: 1,
+    shadowRadius: 0,
+    elevation: 4,
+  },
+  shareBtnText: {
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.black,
+    letterSpacing: 0.3,
   },
 });
 

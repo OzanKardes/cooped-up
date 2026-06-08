@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TouchableWithoutFeedback,
-  RefreshControl, FlatList, Animated, Easing,
+  RefreshControl, FlatList, Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -347,6 +347,29 @@ function YourDayCard({
   );
 }
 
+// ─── Make Plan button ─────────────────────────────────────────────────────────
+function MakePlanGlow({
+  btnRef, onPress,
+}: {
+  btnRef?: React.RefObject<View>;
+  onPress: () => void;
+}) {
+  return (
+    <View ref={btnRef as any} collapsable={false} style={styles.makePlanWrapper}>
+      <TouchableOpacity
+        style={[styles.makePlanCard, { marginBottom: 0 }]}
+        onPress={onPress}
+        activeOpacity={0.88}
+      >
+        <Text style={styles.makePlanText}>Make Plan</Text>
+        <View style={styles.plusCircle}>
+          <Ionicons name="add" size={20} color={Colors.navy} />
+        </View>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 // ─── Home screen ──────────────────────────────────────────────────────────────
 export interface HomeTourRefs {
   weatherCard: React.RefObject<View>;
@@ -534,17 +557,10 @@ export default function HomeScreen({
           />
 
           {/* ── Make Plan card ── */}
-          <TouchableOpacity
-            ref={homeTourRefs?.makePlan as any}
-            style={styles.makePlanCard}
+          <MakePlanGlow
+            btnRef={homeTourRefs?.makePlan}
             onPress={() => { setCreateModalVisible(true); onModalChange?.(true); }}
-            activeOpacity={0.88}
-          >
-            <Text style={styles.makePlanText}>Make Plan</Text>
-            <View style={styles.plusCircle}>
-              <Ionicons name="add" size={20} color={Colors.navy} />
-            </View>
-          </TouchableOpacity>
+          />
 
           {/* ── Section: Weather ── */}
           <Text style={[styles.sectionLabel, { color: textMuted }]}>WEATHER</Text>
@@ -744,6 +760,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  makePlanWrapper: {
+    marginBottom: 32,
   },
 
   // Section labels

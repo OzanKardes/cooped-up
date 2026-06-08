@@ -202,3 +202,42 @@ export async function fetchFullForecast(): Promise<FullForecast> {
 
   return { current, hourly, daily };
 }
+
+// ─── Per-slot hourly scores for plan wizard ────────────────────────────────────
+// Returns a map keyed `${dayOffset}:${hour}` → { emoji, score }
+// dayOffset 0 = today … up to 13 (two weeks)
+export async function fetchHourlyScores(): Promise<Map<string, { emoji: string; score: number }>> {
+  const url =
+    `https://api.open-meteo.com/v1/forecast` +
+    `?latitude=${LAT}&longitude=${LON}` +
+    `&hourly=temperature_2m,weathercode,windspeed_10m` +
+    `&timezone=Europe%2FLondon&forecast_days=14`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Weather ${res.status}`);
+  const data = await res.json();
+  const times: string[] = data.hourly.time;
+  const temps: number[] = data.hourly.temperature_2m;
+  const codes: number[] = data.hourly.weathercode;
+  const winds: number[] = data.hourly.windspeed_10m;
+  const now = new Date();
+  const dateMap: Record<string, number> = {};
+  for (let d = 0; d < 14; d++) {
+    const dt = new Date(now);
+    dt.setDate(dt.getDate() + d);
+    dateMap[dt.toISOString().slice(0, 10)] = d;
+  }
+  const result = new Map<string, { emoji: string; score: number; temp: number }>();
+  for (let i = 0; i < times.length; i++) {
+    const dateStr = times[i].slice(0, 10);
+    const hour = parseInt(times[i].slice(11, 13), 10);
+    const d = dateMap[dateStr];
+    if (d !== undefined) {
+      result.set(`${d}:${hour}`, {
+        emoji: wmoEmoji(codes[i]),
+        score: outdoorScore(codes[i], Math.round(temps[i]), winds[i]),
+        temp: Math.round(temps[i]),
+      });
+    }
+  }
+  return result;
+}

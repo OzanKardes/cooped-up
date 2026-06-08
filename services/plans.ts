@@ -462,6 +462,30 @@ export async function inviteMoreToPlan(planId: string, inviteeIds: string[]): Pr
   }
 }
 
+// Returns map of userId → ISO plan times for all friends' attended plans.
+// Used by the plan wizard to compute per-slot friend availability.
+export async function getFriendAttendances(friendIds: string[]): Promise<Map<string, string[]>> {
+  if (friendIds.length === 0) return new Map();
+  try {
+    const { data, error } = await supabase
+      .from('plan_attendees')
+      .select('user_id, plans!inner(time)')
+      .in('user_id', friendIds);
+    if (error) throw error;
+    const result = new Map<string, string[]>();
+    for (const row of (data ?? []) as any[]) {
+      const t = row.plans?.time;
+      if (!t) continue;
+      const arr = result.get(row.user_id) ?? [];
+      arr.push(t);
+      result.set(row.user_id, arr);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
 // Helper: format a Plan from DB into display-friendly shape
 export function formatPlanTime(isoTime: string): string {
   const d = new Date(isoTime);
